@@ -9,7 +9,6 @@ import stat
 import string
 import subprocess
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -387,6 +386,10 @@ def run_claude_code(
     # Always add --verbose for stream-json to ensure proper JSONL output
     if effective_fmt == "stream-json" and not _args_has_flag(extra, "--verbose"):
         cmd += ["--verbose"]
+
+    # Ensure JSONL is actually printed by Claude when we're going to parse it
+    if effective_fmt == "stream-json" and not show_output and not _args_has_flag(extra, "--print"):
+        cmd += ["--print"]
 
     cmd += extra
 
