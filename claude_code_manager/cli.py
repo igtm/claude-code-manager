@@ -17,6 +17,43 @@ import typer
 
 from . import __version__
 
+# i18n loader and translator
+I18N_CACHE: dict[str, dict[str, str]] = {}
+
+
+def load_i18n_toml(path: Path) -> dict[str, dict[str, str]]:
+    try:
+        import tomllib
+
+        if not path.exists():
+            return {}
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        blocks = data.get("i18n") if isinstance(data.get("i18n"), dict) else data
+        result: dict[str, dict[str, str]] = {}
+        for lang, mapping in (blocks or {}).items():
+            if isinstance(mapping, dict):
+                # Ensure values are strings
+                result[lang] = {str(k): str(v) for k, v in mapping.items()}
+        return result
+    except Exception:
+        return {}
+
+
+def set_i18n(path: Path) -> None:
+    global I18N_CACHE
+    I18N_CACHE = load_i18n_toml(path)
+
+
+def tr(key: str, lang: str, **kwargs) -> str:
+    # Lookup order: selected lang -> en -> key
+    base = I18N_CACHE.get(lang) or {}
+    s = base.get(key) or (I18N_CACHE.get("en") or {}).get(key) or key
+    try:
+        return s.format(**kwargs)
+    except Exception:
+        return s
+
+
 APP = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
@@ -58,6 +95,8 @@ class Config:
     doctor: bool = False
     worktree_parallel: bool = False
     worktree_parallel_max_semaphore: int = 1
+    lang: str = "en"
+    i18n_path: str = ".claude-manager.i18n.toml"
 
 
 TODO_TOP_PATTERN = re.compile(r"^- \[ \] (?P<title>.+)$")
@@ -326,17 +365,19 @@ def ensure_branch(
     cwd: Path | None = None,
     prefer_local_todo: bool = True,  # kept for backward-compat; no longer used
     todo_relpath: str = "TODO.md",  # kept for backward-compat; no longer used
+    *,
+    lang: str = "en",
 ) -> None:
     git("fetch", "--all", cwd=cwd)
 
     # Check for any local tracked changes before switching branches
     changed = _list_tracked_changes(cwd=cwd)
     if changed:
-        echo("Uncommitted changes detected:", err=True)
+        echo(tr("uncommitted_changes", lang), err=True)
         for p in sorted(changed):
             echo(f"  - {p}", err=True)
-        echo("Please commit or stash your changes before switching branches.", err=True)
-        echo("Hint: git add -A && git commit -m 'WIP'  or  git stash -u", err=True)
+        echo(tr("uncommitted_hint", lang), err=True)
+        echo(tr("uncommitted_hint2", lang), err=True)
         raise typer.Exit(code=1)
 
     git("checkout", base, cwd=cwd)
@@ -425,6 +466,7 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> No
         cwd=cwd,
         prefer_local_todo=True,
         todo_relpath=cfg.input_path,
+        lang=cfg.lang,
     )
 
     hooks_path = (cwd or Path.cwd()) / cfg.hooks_config
@@ -447,7 +489,7 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> No
     pr_body = cfg.github_pr_body_template.format(todo_item=item.title)
     pr_url = create_pr(pr_title, pr_body, cwd=cwd)
     if pr_url:
-        echo(f"PR created: {pr_url}")
+        echo(tr("pr_created", cfg.lang, url=pr_url))
 
     # Update TODO.md with PR link; do not commit it (it's git-ignored)
     todo_path = (cwd or Path.cwd()) / cfg.input_path
@@ -497,6 +539,7 @@ def process_in_worktree(root: Path, item: TodoItem, cfg: Config) -> None:
         cwd=wt_path,
         prefer_local_todo=True,
         todo_relpath=cfg.input_path,
+        lang=cfg.lang,
     )
 
     # Now process inside the worktree path
@@ -524,6 +567,10 @@ def run(
     doctor: bool = typer.Option(False, "--doctor", "-D"),
     worktree_parallel: bool = typer.Option(False, "--worktree-parallel", "-w"),
     worktree_parallel_max_semaphore: int = typer.Option(1, "--worktree-parallel-max-semaphore"),
+    lang: str = typer.Option("en", "--lang", "-L"),
+    i18n_path: str = typer.Option(
+        ".claude-manager.i18n.toml", "--i18n-path", help="Path to i18n TOML file"
+    ),
 ):
     cfg = Config(
         cooldown=cooldown,
@@ -543,6 +590,8 @@ def run(
         doctor=doctor,
         worktree_parallel=worktree_parallel,
         worktree_parallel_max_semaphore=worktree_parallel_max_semaphore,
+        lang=lang,
+        i18n_path=i18n_path,
     )
 
     # Load config file overrides
@@ -556,64 +605,59 @@ def run(
 
     root = Path.cwd()
 
+    # Load i18n from TOML
+    set_i18n(root / cfg.i18n_path)
+
     if doctor:
-        echo("Doctor: validating configuration...")
+        echo(tr("doctor_validating", cfg.lang))
         hooks_abspath = root / cfg.hooks_config
         todo_abspath = root / cfg.input_path
-        echo(f"base branch: {cfg.git_base_branch}")
+        echo(tr("base_branch", cfg.lang, branch=cfg.git_base_branch))
 
         ok = True
         if hooks_abspath.exists():
-            echo(f"✅ hooks file exists: {hooks_abspath}")
+            echo(tr("hooks_file_exists", cfg.lang, path=str(hooks_abspath)))
         else:
-            echo(f"❌ hooks file missing: {hooks_abspath}", err=True)
+            echo(tr("hooks_file_missing", cfg.lang, path=str(hooks_abspath)), err=True)
             ok = False
 
         if todo_abspath.exists():
-            echo(f"✅ TODO file exists: {todo_abspath}")
+            echo(tr("todo_file_exists", cfg.lang, path=str(todo_abspath)))
         else:
-            echo(f"❌ TODO file missing: {todo_abspath}", err=True)
+            echo(tr("todo_file_missing", cfg.lang, path=str(todo_abspath)), err=True)
             ok = False
 
         # Check git repo and ignore status
         git_ok = True
         try:
             git("rev-parse", "--is-inside-work-tree")
-            echo("✅ git repository: OK")
+            echo(tr("git_repo_ok", cfg.lang))
         except Exception as e:
-            echo(f"❌ git repository check failed: {e}", err=True)
+            echo(tr("git_repo_failed", cfg.lang, error=e), err=True)
             git_ok = False
 
         ignore_ok = True
         try:
             if is_git_ignored(todo_abspath, cwd=root):
-                echo("✅ TODO file is git-ignored")
+                echo(tr("todo_ignored_ok", cfg.lang))
             else:
-                echo(
-                    f"❌ TODO file is not ignored by git: {todo_abspath}\n"
-                    "   Please add it to .gitignore (e.g., '/TODO.md') and rerun.",
-                    err=True,
-                )
+                echo(tr("todo_not_ignored", cfg.lang, path=str(todo_abspath)), err=True)
                 ignore_ok = False
         except Exception as e:
-            echo(f"❌ Failed to check gitignore: {e}", err=True)
+            echo(tr("gitignore_check_failed", cfg.lang, error=e), err=True)
             ignore_ok = False
 
         if ok and git_ok and ignore_ok:
-            echo("✅ Doctor: OK")
+            echo(tr("doctor_ok", cfg.lang))
             raise typer.Exit(code=0)
         else:
-            echo("❌ Doctor: Failed", err=True)
+            echo(tr("doctor_failed", cfg.lang), err=True)
             raise typer.Exit(code=1)
 
     # Ensure TODO file is ignored before proceeding
     todo_abspath = root / cfg.input_path
     if not is_git_ignored(todo_abspath, cwd=root):
-        echo(
-            f"TODO file must be ignored by git: {todo_abspath}\n"
-            "Please add it to .gitignore (e.g., '/TODO.md') and rerun.",
-            err=True,
-        )
+        echo(tr("todo_must_be_ignored", cfg.lang, path=str(todo_abspath)), err=True)
         raise typer.Exit(code=1)
 
     md = (
@@ -623,12 +667,12 @@ def run(
     )
     items = parse_todo_markdown(md)
     if not items:
-        echo("No TODO items found.")
+        echo(tr("no_todo", cfg.lang))
         raise typer.Exit(code=0)
 
     if cfg.worktree_parallel:
         max_workers = max(1, int(cfg.worktree_parallel_max_semaphore))
-        echo(f"Running in worktree-parallel mode with {max_workers} workers...")
+        echo(tr("running_parallel", cfg.lang, workers=max_workers))
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(process_in_worktree, root, item, cfg) for item in items]
             for fut in as_completed(futures):
@@ -638,7 +682,7 @@ def run(
         return
 
     for idx, item in enumerate(items):
-        echo(f"Processing: {item.title}")
+        echo(tr("processing", cfg.lang, title=item.title))
         process_one_todo(item, cfg, cwd=root)
         if idx < len(items) - 1 and cfg.cooldown > 0:
             time.sleep(cfg.cooldown)
