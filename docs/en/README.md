@@ -2,17 +2,12 @@
 
 <div align="center">
 
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 A powerful CLI tool to orchestrate Claude Code runs from a Markdown TODO list, enabling automated task execution and pull request creation.
 
 </div>
-
-## Documentation
-
-- [English](docs/en/README.md)
-- [日本語](docs/ja/README.md)
 
 ## 🚀 Features
 
@@ -128,7 +123,7 @@ claude-manager run --worktree-parallel --worktree-parallel-max-semaphore 3
 
 ## 🤝 Contributing
 
-Contributions are welcome! See [IMPLEMENT_PROMPT.md](IMPLEMENT_PROMPT.md) for the design plan and implementation details.
+Contributions are welcome! See [IMPLEMENT_PROMPT.md](../../IMPLEMENT_PROMPT.md) for the design plan and implementation details.
 
 ## 📄 License
 
