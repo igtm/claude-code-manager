@@ -444,35 +444,68 @@ def run_claude_code(
         def _print_status(prefix_char: str | None = None, *, final: bool = False):
             nonlocal last_len
             ch = prefix_char if prefix_char is not None else spinner[spin_idx % len(spinner)]
-            counts_part = ", ".join(
+
+            # Build plain text parts for width calculation (avoid ANSI when measuring)
+            counts_part_plain = ", ".join(
                 [
                     f"assistant: {counts['assistant']}",
                     f"user: {counts['user']}",
                     f"system: {counts['system']}",
                 ]
             )
-            usage_part = ""
+            usage_part_plain = ""
             if usage_totals:
-                usage_part = ", ".join(
+                usage_part_plain = ", ".join(
                     f"{k}: {usage_totals[k]}" for k in sorted(usage_totals.keys())
                 )
-                usage_part = f"usage: {usage_part}"
+                usage_part_plain = f"usage: {usage_part_plain}"
+
+            def _colorize_line_from_plain(line_plain: str) -> str:
+                # Replace known tokens with colored equivalents so printable length stays identical
+                line_colored = line_plain
+                try:
+                    spinner_col = color_success(ch) if ch == "✓" else color_info(ch)
+                    if line_colored.startswith(ch):
+                        line_colored = spinner_col + line_colored[len(ch) :]
+
+                    a_tok = f"assistant: {counts['assistant']}"
+                    u_tok = f"user: {counts['user']}"
+                    s_tok = f"system: {counts['system']}"
+                    if a_tok in line_colored:
+                        line_colored = line_colored.replace(a_tok, color_success(a_tok))
+                    if u_tok in line_colored:
+                        line_colored = line_colored.replace(u_tok, color_info(u_tok))
+                    if s_tok in line_colored:
+                        line_colored = line_colored.replace(s_tok, color_warn(s_tok))
+
+                    if "usage:" in line_colored:
+                        line_colored = line_colored.replace("usage:", color_info("usage:"))
+                    for k in sorted(usage_totals.keys()):
+                        tok = f"{k}: {usage_totals[k]}"
+                        if tok in line_colored:
+                            line_colored = line_colored.replace(tok, color_debug(tok))
+                except Exception:
+                    pass
+                return line_colored
 
             if sys.stderr.isatty():
                 # Two-line TTY status: line1 counts, line2 usage
-                line1 = f"{ch} running claude...: {counts_part}"
-                line2 = usage_part
+                line1_plain = f"{ch} running claude...: {counts_part_plain}"
+                line2_plain = usage_part_plain
                 try:
                     width = shutil.get_terminal_size(fallback=(120, 20)).columns
                 except Exception:
                     width = 0
-                if width and len(line1) >= width:
-                    line1 = line1[: max(1, width - 1)]
-                if width and len(line2) >= width:
-                    line2 = line2[: max(1, width - 1)]
+                if width and len(line1_plain) >= width:
+                    line1_plain = line1_plain[: max(1, width - 1)]
+                if width and len(line2_plain) >= width:
+                    line2_plain = line2_plain[: max(1, width - 1)]
+
+                line1_out = _colorize_line_from_plain(line1_plain)
+                line2_out = _colorize_line_from_plain(line2_plain)
                 try:
-                    sys.stderr.write("\r\x1b[2K" + line1)
-                    sys.stderr.write("\n\x1b[2K" + line2)
+                    sys.stderr.write("\r\x1b[2K" + line1_out)
+                    sys.stderr.write("\n\x1b[2K" + line2_out)
                     if not final:
                         # Move cursor up to be ready to overwrite both lines on next update
                         sys.stderr.write("\x1b[1A")
@@ -480,17 +513,20 @@ def run_claude_code(
                 except Exception:
                     pass
             else:
-                # Non-TTY: fall back to single-line overwrite with counts + usage
-                combined = f"{ch} running claude...: {counts_part}"
-                if usage_part:
-                    combined = combined + " | " + usage_part
-                pad = max(0, last_len - len(combined))
+                # Non-TTY: fall back to single-line overwrite with counts + usage (no ANSI in logs)
+                combined_plain = f"{ch} running claude...: {counts_part_plain}"
+                if usage_part_plain:
+                    combined_plain = combined_plain + " | " + usage_part_plain
+
+                combined_out = combined_plain  # keep plain text for non-TTY
+
+                pad = max(0, last_len - len(combined_plain))
                 try:
-                    sys.stderr.write("\r" + combined + (" " * pad))
+                    sys.stderr.write("\r" + combined_out + (" " * pad))
                     sys.stderr.flush()
                 except Exception:
                     pass
-                last_len = len(combined)
+                last_len = len(combined_plain)
 
         # initial status
         _print_status()
