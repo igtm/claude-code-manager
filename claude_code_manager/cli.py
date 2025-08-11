@@ -563,7 +563,8 @@ def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: str | None) -> 
             replacement_suffix = f" [#{num}]({pr_url})"
         else:
             replacement_suffix = f" ({pr_url})"
-    pattern = re.compile(rf"^- \[ \] {re.escape(item.title)}$", re.MULTILINE)
+    # Be tolerant of trailing spaces after the title in the original TODO line
+    pattern = re.compile(rf"^- \\[ \\] {re.escape(item.title)}\\s*$", re.MULTILINE)
     new_text, n = pattern.subn(f"- [x] {item.title}{replacement_suffix}", text, count=1)
     if n:
         todo_path.write_text(new_text, encoding="utf-8")
