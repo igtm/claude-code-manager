@@ -564,7 +564,7 @@ def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: str | None) -> 
         else:
             replacement_suffix = f" ({pr_url})"
     # Be tolerant of trailing spaces after the title in the original TODO line
-    pattern = re.compile(rf"^- \\[ \\] {re.escape(item.title)}\\s*$", re.MULTILINE)
+    pattern = re.compile(rf"^- \[ \] {re.escape(item.title)}\s*$", re.MULTILINE)
     new_text, n = pattern.subn(f"- [x] {item.title}{replacement_suffix}", text, count=1)
     if n:
         todo_path.write_text(new_text, encoding="utf-8")
@@ -864,6 +864,11 @@ def run(
                 exc = fut.exception()
                 if exc:
                     raise exc
+        # After parallel run, return to base branch in root (best-effort)
+        try:
+            git("checkout", cfg.git_base_branch, cwd=root)
+        except Exception:
+            pass
         # After parallel run, print final report
         _print_final_report(cfg)
         return
@@ -873,6 +878,12 @@ def run(
         process_one_todo(item, cfg, cwd=root)
         if idx < len(items) - 1 and cfg.cooldown > 0:
             time.sleep(cfg.cooldown)
+
+    # After sequential run, return to base branch (best-effort)
+    try:
+        git("checkout", cfg.git_base_branch, cwd=root)
+    except Exception:
+        pass
 
     # After sequential run, print final report
     _print_final_report(cfg)
