@@ -9,7 +9,9 @@ import stat
 import string
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,6 +116,60 @@ def debug_log(msg: str) -> None:
             pass
 
 
+class LiveRows:
+    """Simple multi-row live renderer for TTY. Each row has two lines."""
+
+    def __init__(self, rows: int):
+        self.rows = int(rows)
+        self.lines: list[tuple[str, str, bool]] = [("", "", False) for _ in range(self.rows)]
+        self._lock = threading.Lock()
+        self._initialized = False
+
+    def _draw(self):
+        total_lines = self.rows * 2
+        try:
+            if not self._initialized:
+                # Allocate lines once
+                for _ in range(total_lines):
+                    sys.stderr.write("\n")
+                # Move back to top of block
+                if total_lines:
+                    sys.stderr.write(f"\x1b[{total_lines}A")
+                self._initialized = True
+            else:
+                # Move back to top of block to redraw
+                if total_lines:
+                    sys.stderr.write(f"\x1b[{total_lines}A")
+
+            # Redraw all rows
+            for i in range(self.rows):
+                l1, l2, _ = self.lines[i]
+                sys.stderr.write("\r\x1b[2K" + (l1 or ""))
+                sys.stderr.write("\n\x1b[2K" + (l2 or ""))
+
+            # Leave cursor at bottom of block
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+    def update(self, index: int, line1: str, line2: str, final: bool = False) -> None:
+        if index < 0 or index >= self.rows:
+            return
+        with self._lock:
+            self.lines[index] = (line1, line2, final)
+            self._draw()
+
+    def finish(self) -> None:
+        # Ensure cursor is just after the block
+        try:
+            if not self._initialized:
+                return
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+
 @APP.callback()
 def _version_callback(
     version: bool = typer.Option(False, "--version", "-v", help="Show version and exit"),
@@ -189,8 +245,6 @@ def parse_todo_markdown(md: str) -> list[TodoItem]:
         items.append(current)
     return items
 
-
-CLAUDE_HOOKS_MARK = "// added by claude-code-manager"
 
 STOP_HOOK_REL_SCRIPT = ".claude/hooks/stop-keep-asking.py"
 STOP_HOOK_COMMAND = f"$CLAUDE_PROJECT_DIR/{STOP_HOOK_REL_SCRIPT}"
@@ -344,7 +398,6 @@ def ensure_hooks_config(path: Path, max_keep_asking: int, done_message: str) -> 
             {
                 "type": "command",
                 "command": STOP_HOOK_COMMAND,
-                "comment": CLAUDE_HOOKS_MARK,
             }
         ]
     }
@@ -384,6 +437,8 @@ def run_claude_code(
     *,
     prompt: str,
     output_format: str = "stream-json",
+    row_updater: Callable[[int, str, str, bool], None] | None = None,
+    row_index: int | None = None,
 ) -> int:
     # Always run in headless mode using -p
     extra = _args_list(args)
@@ -458,6 +513,21 @@ def run_claude_code(
                 )
                 usage_part_plain = f"usage: {usage_part_plain}"
 
+            line1_plain = f"{ch} running claude...: {counts_part_plain}"
+            line2_plain = usage_part_plain
+
+            # Truncate to terminal width
+            try:
+                import shutil as _shutil
+
+                width = max(20, int(_shutil.get_terminal_size((80, 24)).columns))
+            except Exception:
+                width = 80
+            if len(line1_plain) > width:
+                line1_plain = line1_plain[: width - 1]
+            if line2_plain and len(line2_plain) > width:
+                line2_plain = line2_plain[: width - 1]
+
             def _colorize_line_from_plain(line_plain: str) -> str:
                 # Replace known tokens with colored equivalents so printable length stays identical
                 line_colored = line_plain
@@ -486,41 +556,38 @@ def run_claude_code(
                     pass
                 return line_colored
 
-            if sys.stderr.isatty():
-                # Two-line TTY status: line1 counts, line2 usage
-                line1_plain = f"{ch} running claude...: {counts_part_plain}"
-                line2_plain = usage_part_plain
-                try:
-                    width = shutil.get_terminal_size(fallback=(120, 20)).columns
-                except Exception:
-                    width = 0
-                if width and len(line1_plain) >= width:
-                    line1_plain = line1_plain[: max(1, width - 1)]
-                if width and len(line2_plain) >= width:
-                    line2_plain = line2_plain[: max(1, width - 1)]
+            line1_out = (
+                _colorize_line_from_plain(line1_plain) if sys.stderr.isatty() else line1_plain
+            )
+            line2_out = (
+                _colorize_line_from_plain(line2_plain)
+                if (sys.stderr.isatty() and line2_plain)
+                else line2_plain
+            )
 
-                line1_out = _colorize_line_from_plain(line1_plain)
-                line2_out = _colorize_line_from_plain(line2_plain)
+            if row_updater is not None and row_index is not None and sys.stderr.isatty():
+                row_updater(row_index, line1_out, line2_out or "", final)
+                return
+
+            # fallback to per-process rendering
+            if sys.stderr.isatty():
+                # Two-line TTY status
                 try:
                     sys.stderr.write("\r\x1b[2K" + line1_out)
-                    sys.stderr.write("\n\x1b[2K" + line2_out)
+                    sys.stderr.write("\n\x1b[2K" + (line2_out or ""))
                     if not final:
-                        # Move cursor up to be ready to overwrite both lines on next update
                         sys.stderr.write("\x1b[1A")
                     sys.stderr.flush()
                 except Exception:
                     pass
             else:
-                # Non-TTY: fall back to single-line overwrite with counts + usage (no ANSI in logs)
-                combined_plain = f"{ch} running claude...: {counts_part_plain}"
-                if usage_part_plain:
-                    combined_plain = combined_plain + " | " + usage_part_plain
-
-                combined_out = combined_plain  # keep plain text for non-TTY
-
+                # Non-TTY single line
+                combined_plain = line1_plain
+                if line2_plain:
+                    combined_plain = combined_plain + " | " + line2_plain
                 pad = max(0, last_len - len(combined_plain))
                 try:
-                    sys.stderr.write("\r" + combined_out + (" " * pad))
+                    sys.stderr.write("\r" + combined_plain + (" " * pad))
                     sys.stderr.flush()
                 except Exception:
                     pass
@@ -582,9 +649,10 @@ def run_claude_code(
                 pass
         # finalize status line with a check mark and newline
         try:
-            _print_status(prefix_char="✓")
-            sys.stderr.write("\n")
-            sys.stderr.flush()
+            _print_status(prefix_char="✓", final=True)
+            if row_updater is None or row_index is None:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
         except Exception:
             pass
         return rc
@@ -787,6 +855,8 @@ def process_one_todo(
     *,
     skip_branch_ensure: bool = False,
     branch_name: str | None = None,
+    row_updater: Callable[[int, str, str, bool], None] | None = None,
+    row_index: int | None = None,
 ) -> None:
     branch = branch_name or f"{cfg.git_branch_prefix}{slugify(item.title)}"
     if not skip_branch_ensure:
@@ -818,6 +888,8 @@ def process_one_todo(
             cwd=cwd or Path.cwd(),
             prompt=prompt,
             output_format=cfg.headless_output_format,
+            row_updater=row_updater,
+            row_index=row_index,
         )
     except FileNotFoundError:
         echo(tr("claude_not_found", cfg.lang), err=True)
@@ -853,7 +925,14 @@ def process_one_todo(
         pass
 
 
-def process_in_worktree(root: Path, item: TodoItem, cfg: Config) -> None:
+def process_in_worktree(
+    root: Path,
+    item: TodoItem,
+    cfg: Config,
+    *,
+    row_updater: Callable[[int, str, str, bool], None] | None = None,
+    row_index: int | None = None,
+) -> None:
     worktrees_dir = root / ".worktrees"
     worktrees_dir.mkdir(exist_ok=True)
 
@@ -879,7 +958,15 @@ def process_in_worktree(root: Path, item: TodoItem, cfg: Config) -> None:
     git("worktree", "add", "-B", branch, str(wt_path), cfg.git_base_branch, cwd=root)
 
     # Do NOT switch to base/main inside the worktree; it's already on the new branch
-    process_one_todo(item, cfg, cwd=wt_path, skip_branch_ensure=True, branch_name=branch)
+    process_one_todo(
+        item,
+        cfg,
+        cwd=wt_path,
+        skip_branch_ensure=True,
+        branch_name=branch,
+        row_updater=row_updater,
+        row_index=row_index,
+    )
 
 
 def _print_final_report(cfg: Config) -> None:
@@ -1059,14 +1146,27 @@ def run(
     if cfg.worktree_parallel:
         max_workers = max(1, int(cfg.worktree_parallel_max_semaphore))
         echo(tr("running_parallel", cfg.lang, workers=max_workers))
-        # Warn if .worktrees is not ignored, but do not block
         _warn_if_worktrees_not_ignored(root, lang=cfg.lang)
+        # Prepare live rows for TTY
+        live = LiveRows(len(items)) if sys.stderr.isatty() else None
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [ex.submit(process_in_worktree, root, item, cfg) for item in items]
+            futures = [
+                ex.submit(
+                    process_in_worktree,
+                    root,
+                    item,
+                    cfg,
+                    row_updater=(live.update if live else None),
+                    row_index=i,
+                )
+                for i, item in enumerate(items)
+            ]
             for fut in as_completed(futures):
                 exc = fut.exception()
                 if exc:
                     raise exc
+        if live:
+            live.finish()
         # After parallel run, return to base branch in root (best-effort)
         try:
             git("checkout", cfg.git_base_branch, cwd=root)
