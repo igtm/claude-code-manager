@@ -282,6 +282,23 @@ def git_call(args: list[str], cwd: Path | None = None) -> None:
     subprocess.check_call(["git", *args], cwd=str(cwd) if cwd else None)
 
 
+def is_git_ignored(path: Path, cwd: Path | None = None) -> bool:
+    """Return True if path is ignored by git according to ignore rules."""
+    spath = str(path)
+    if cwd:
+        try:
+            spath = os.path.relpath(path, cwd)
+        except Exception:
+            spath = str(path)
+    res = subprocess.run(
+        ["git", "check-ignore", "-q", "--", spath],
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return res.returncode == 0
+
+
 def _list_tracked_changes(cwd: Path | None = None) -> set[str]:
     changed: set[str] = set()
     try:
@@ -307,60 +324,27 @@ def ensure_branch(
     base: str,
     name: str,
     cwd: Path | None = None,
-    prefer_local_todo: bool = True,
-    todo_relpath: str = "TODO.md",
+    prefer_local_todo: bool = True,  # kept for backward-compat; no longer used
+    todo_relpath: str = "TODO.md",  # kept for backward-compat; no longer used
 ) -> None:
     git("fetch", "--all", cwd=cwd)
 
-    # Check for local changes (excluding TODO.md) before switching branches
+    # Check for any local tracked changes before switching branches
     changed = _list_tracked_changes(cwd=cwd)
-    # Normalize relative paths for comparison
-    todo_rel_norm = todo_relpath.replace("\\", "/")
-    changed_excl_todo = {p for p in changed if p.replace("\\", "/") != todo_rel_norm}
-    if changed_excl_todo:
-        echo("Uncommitted changes detected (excluding TODO.md):", err=True)
-        for p in sorted(changed_excl_todo):
+    if changed:
+        echo("Uncommitted changes detected:", err=True)
+        for p in sorted(changed):
             echo(f"  - {p}", err=True)
         echo("Please commit or stash your changes before switching branches.", err=True)
         echo("Hint: git add -A && git commit -m 'WIP'  or  git stash -u", err=True)
         raise typer.Exit(code=1)
 
-    # Optionally stash local TODO.md before switching
-    stashed = False
-    if prefer_local_todo:
-        try:
-            # Stash only TODO.md if modified
-            git("stash", "push", "-m", "claude-manager: TODO.md", "--", todo_relpath, cwd=cwd)
-            stashed = True
-        except Exception:
-            stashed = False
-
     git("checkout", base, cwd=cwd)
-    # Removed: pull after checkout
     try:
         git("checkout", "-b", name, cwd=cwd)
     except subprocess.CalledProcessError:
         git("checkout", name, cwd=cwd)
         git("rebase", base, cwd=cwd)
-
-    # Re-apply stashed TODO.md so local changes take precedence
-    if stashed:
-        try:
-            git("stash", "pop", cwd=cwd)
-        except Exception:
-            # If conflict occurs, keep local version
-            try:
-                subprocess.check_call(
-                    ["git", "checkout", "--ours", todo_relpath],
-                    cwd=str(cwd) if cwd else None,
-                )
-                subprocess.check_call(
-                    ["git", "add", todo_relpath],
-                    cwd=str(cwd) if cwd else None,
-                )
-                # Do not commit here; later flow will commit when updating TODO
-            except Exception:
-                pass
 
 
 def _commit_and_push_filtered(
@@ -600,6 +584,7 @@ def run(
             echo(f"❌ TODO file missing: {todo_abspath}", err=True)
             ok = False
 
+        # Check git repo and ignore status
         git_ok = True
         try:
             git("rev-parse", "--is-inside-work-tree")
@@ -608,12 +593,37 @@ def run(
             echo(f"❌ git repository check failed: {e}", err=True)
             git_ok = False
 
-        if ok and git_ok:
+        ignore_ok = True
+        try:
+            if is_git_ignored(todo_abspath, cwd=root):
+                echo("✅ TODO file is git-ignored")
+            else:
+                echo(
+                    f"❌ TODO file is not ignored by git: {todo_abspath}\n"
+                    "   Please add it to .gitignore (e.g., '/TODO.md') and rerun.",
+                    err=True,
+                )
+                ignore_ok = False
+        except Exception as e:
+            echo(f"❌ Failed to check gitignore: {e}", err=True)
+            ignore_ok = False
+
+        if ok and git_ok and ignore_ok:
             echo("✅ Doctor: OK")
             raise typer.Exit(code=0)
         else:
             echo("❌ Doctor: Failed", err=True)
             raise typer.Exit(code=1)
+
+    # Ensure TODO file is ignored before proceeding
+    todo_abspath = root / cfg.input_path
+    if not is_git_ignored(todo_abspath, cwd=root):
+        echo(
+            f"TODO file must be ignored by git: {todo_abspath}\n"
+            "Please add it to .gitignore (e.g., '/TODO.md') and rerun.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     md = (
         (root / cfg.input_path).read_text(encoding="utf-8")
