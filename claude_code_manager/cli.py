@@ -432,9 +432,10 @@ def run_claude_code(
             except Exception:
                 pass
     else:
-        # Parse JSONL quietly and live-update a one-line status with counts
+        # Parse JSONL quietly and live-update a one-line status with counts and usage
         counts: dict[str, int] = {"system": 0, "assistant": 0, "user": 0}
         allowed = set(counts.keys())
+        usage_totals: dict[str, int] = {}
 
         spinner = "|/-\\"
         spin_idx = 0
@@ -443,13 +444,22 @@ def run_claude_code(
         def _print_status(prefix_char: str | None = None):
             nonlocal last_len
             ch = prefix_char if prefix_char is not None else spinner[spin_idx % len(spinner)]
-            msg = f"{ch} running claude...: " + ", ".join(
-                [
-                    f"assistant: {counts['assistant']}",
-                    f"user: {counts['user']}",
-                    f"system: {counts['system']}",
-                ]
+            parts: list[str] = []
+            parts.append(
+                ", ".join(
+                    [
+                        f"assistant: {counts['assistant']}",
+                        f"user: {counts['user']}",
+                        f"system: {counts['system']}",
+                    ]
+                )
             )
+            if usage_totals:
+                usage_part = ", ".join(
+                    f"{k}: {usage_totals[k]}" for k in sorted(usage_totals.keys())
+                )
+                parts.append(f"usage: {usage_part}")
+            msg = f"{ch} running claude...: " + " | ".join(parts)
             pad = max(0, last_len - len(msg))
             try:
                 sys.stderr.write("\r" + msg + (" " * pad))
@@ -473,12 +483,32 @@ def run_claude_code(
         try:
             for line in p_head.stdout:
                 debug_log(f"line: {line.rstrip()}")
+                dirty = False
                 try:
                     obj = json.loads(line)
                     typ = str(obj.get("type", "")).strip()
                     debug_log(f"parsed type={typ}")
                     if typ in allowed:
                         counts[typ] = counts.get(typ, 0) + 1
+                        dirty = True
+                    # Collect usage totals dynamically
+                    maybe_usage = None
+                    msg_obj = obj.get("message")
+                    if isinstance(msg_obj, dict):
+                        mu = msg_obj.get("usage")
+                        if isinstance(mu, dict):
+                            maybe_usage = mu
+                    if maybe_usage is None and isinstance(obj.get("usage"), dict):
+                        maybe_usage = obj.get("usage")
+                    if isinstance(maybe_usage, dict):
+                        for k, v in maybe_usage.items():
+                            try:
+                                usage_totals[k] = usage_totals.get(k, 0) + int(v)
+                                dirty = True
+                            except Exception:
+                                # ignore non-numeric
+                                pass
+                    if dirty:
                         spin_idx = (spin_idx + 1) % len(spinner)
                         _print_status()
                 except Exception as e:
