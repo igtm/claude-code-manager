@@ -10,9 +10,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import typer
+
 from . import __version__
 
 APP = typer.Typer(
@@ -74,7 +74,7 @@ def parse_todo_markdown(md: str) -> list[TodoItem]:
     Expects GitHub Flavored Markdown checklist structure.
     """
     items: list[TodoItem] = []
-    current: Optional[TodoItem] = None
+    current: TodoItem | None = None
     for line in md.splitlines():
         if TODO_DONE_PATTERN.match(line):
             continue
@@ -104,7 +104,11 @@ def _write_stop_hook_script(script_path: Path, max_keep_asking: int, done_messag
 import json, sys, os, io
 from pathlib import Path
 
-STATE_FILE = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())) / ".claude" / "manager_state.json"
+STATE_FILE = (
+    Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
+    / ".claude"
+    / "manager_state.json"
+)
 
 MAX_ASK = {int(max_keep_asking)}
 DONE_TOKEN = {json.dumps(done_message, ensure_ascii=False)}
@@ -254,7 +258,7 @@ def ensure_hooks_config(path: Path, max_keep_asking: int, done_message: str) -> 
 
 
 def run_claude_code(
-    args: str, show_output: bool, env: Optional[dict] = None, cwd: Optional[Path] = None
+    args: str, show_output: bool, env: dict | None = None, cwd: Path | None = None
 ) -> int:
     cmd = ["claude"] + ([x for x in args.split() if x] if args else [])
     stdout = None if show_output else subprocess.DEVNULL
@@ -268,15 +272,15 @@ def run_claude_code(
     return proc.returncode
 
 
-def git(*args: str, cwd: Optional[Path] = None) -> str:
+def git(*args: str, cwd: Path | None = None) -> str:
     return subprocess.check_output(["git", *args], text=True, cwd=str(cwd) if cwd else None).strip()
 
 
-def git_call(args: list[str], cwd: Optional[Path] = None) -> None:
+def git_call(args: list[str], cwd: Path | None = None) -> None:
     subprocess.check_call(["git", *args], cwd=str(cwd) if cwd else None)
 
 
-def _list_tracked_changes(cwd: Optional[Path] = None) -> set[str]:
+def _list_tracked_changes(cwd: Path | None = None) -> set[str]:
     changed: set[str] = set()
     try:
         out_wt = git("diff", "--name-only", cwd=cwd)
@@ -300,7 +304,7 @@ def _list_tracked_changes(cwd: Optional[Path] = None) -> set[str]:
 def ensure_branch(
     base: str,
     name: str,
-    cwd: Optional[Path] = None,
+    cwd: Path | None = None,
     prefer_local_todo: bool = True,
     todo_relpath: str = "TODO.md",
 ) -> None:
@@ -324,21 +328,13 @@ def ensure_branch(
     if prefer_local_todo:
         try:
             # Stash only TODO.md if modified
-            git(
-                "stash",
-                "push",
-                "-m",
-                "claude-manager: TODO.md",
-                "--",
-                todo_relpath,
-                cwd=cwd,
-            )
+            git("stash", "push", "-m", "claude-manager: TODO.md", "--", todo_relpath, cwd=cwd)
             stashed = True
         except Exception:
             stashed = False
 
     git("checkout", base, cwd=cwd)
-    git("pull", cwd=cwd)
+    # Removed: pull after checkout
     try:
         git("checkout", "-b", name, cwd=cwd)
     except subprocess.CalledProcessError:
@@ -356,19 +352,22 @@ def ensure_branch(
                     ["git", "checkout", "--ours", todo_relpath],
                     cwd=str(cwd) if cwd else None,
                 )
-                subprocess.check_call(["git", "add", todo_relpath], cwd=str(cwd) if cwd else None)
+                subprocess.check_call(
+                    ["git", "add", todo_relpath],
+                    cwd=str(cwd) if cwd else None,
+                )
                 # Do not commit here; later flow will commit when updating TODO
             except Exception:
                 pass
 
 
-def commit_and_push(message: str, branch: str, cwd: Optional[Path] = None):
+def commit_and_push(message: str, branch: str, cwd: Path | None = None):
     git_call(["add", "-A"], cwd=cwd)
     git_call(["commit", "-m", message], cwd=cwd)
     git_call(["push", "-u", "origin", branch], cwd=cwd)
 
 
-def create_pr(title: str, body: str, cwd: Optional[Path] = None) -> Optional[str]:
+def create_pr(title: str, body: str, cwd: Path | None = None) -> str | None:
     # Try gh CLI if available
     try:
         out = subprocess.check_output(
@@ -381,12 +380,12 @@ def create_pr(title: str, body: str, cwd: Optional[Path] = None) -> Optional[str
         return None
 
 
-def pr_number_from_url(url: str) -> Optional[int]:
+def pr_number_from_url(url: str) -> int | None:
     m = re.search(r"/pull/(\d+)", url)
     return int(m.group(1)) if m else None
 
 
-def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: Optional[str]) -> bool:
+def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: str | None) -> bool:
     if not todo_path.exists():
         return False
     text = todo_path.read_text(encoding="utf-8")
@@ -405,7 +404,7 @@ def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: Optional[str]) 
     return False
 
 
-def process_one_todo(item: TodoItem, cfg: Config, cwd: Optional[Path] = None) -> None:
+def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> None:
     branch = f"{cfg.git_branch_prefix}{slugify(item.title)}"
     ensure_branch(
         cfg.git_base_branch,
