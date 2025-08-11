@@ -2,9 +2,7 @@
 
 A CLI to orchestrate claude-code runs from a Markdown TODO list.
 
-## Quick start
+## Language / 言語
 
-- Install: `uv pip install -e .`
-- Run: `claude-manager run --input TODO.md`
-
-See `IMPLEMENT_PROMPT.md` for the design plan.
+- [English](./i18n/README.en.md)
+- [日本語](./i18n/README.ja.md)
