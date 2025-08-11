@@ -5,7 +5,6 @@ import os
 import random
 import re
 import shutil
-import stat
 import string
 import subprocess
 import sys
@@ -196,7 +195,6 @@ class Config:
     config_path: str = ".claude-manager.toml"
     input_path: str = "TODO.md"
     claude_args: str = ""
-    hooks_config: str = ".claude/settings.local.json"
     max_keep_asking: int = 3
     task_done_message: str = "CLAUDE_MANAGER_DONE"
     show_claude_output: bool = False
@@ -252,168 +250,7 @@ def parse_todo_markdown(md: str) -> list[TodoItem]:
     return items
 
 
-STOP_HOOK_REL_SCRIPT = ".claude/hooks/stop-keep-asking.py"
-STOP_HOOK_COMMAND = f"$CLAUDE_PROJECT_DIR/{STOP_HOOK_REL_SCRIPT}"
-
-
-def _write_stop_hook_script(script_path: Path, max_keep_asking: int, done_message: str) -> None:
-    script_path.parent.mkdir(parents=True, exist_ok=True)
-    template = """#!/usr/bin/env python3
-import json, sys, os, io
-from pathlib import Path
-
-STATE_FILE = (
-    Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
-    / ".claude"
-    / "manager_state.json"
-)
-
-MAX_ASK = __MAX_ASK__
-DONE_TOKEN = __DONE_TOKEN__
-
-
-def load_state():
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def save_state(s):
-    try:
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(s, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-def transcript_has_done(path: str, token: str) -> bool:
-    if not path:
-        return False
-    try:
-        p = os.path.expanduser(path)
-        with open(p, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                if token in line:
-                    return True
-    except Exception:
-        return False
-    return False
-
-
-def main():
-    try:
-        data = json.load(sys.stdin)
-    except Exception:
-        # invalid input, do nothing
-        sys.exit(0)
-
-    sid = data.get("session_id") or ""
-    transcript_path = data.get("transcript_path") or ""
-
-    # If DONE token already present, allow stop
-    if transcript_has_done(transcript_path, DONE_TOKEN):
-        print(json.dumps({"continue": True, "suppressOutput": True}, ensure_ascii=False))
-        return
-
-    # Count per-session asks
-    state = load_state()
-    key = f"{sid}:asks"
-    cnt = int(state.get(key, 0))
-    if cnt < MAX_ASK:
-        state[key] = cnt + 1
-        save_state(state)
-        print(json.dumps({
-            "decision": "block",
-            "reason": f"続けて。実装が終了し終わっていたら、{DONE_TOKEN}と返して。",
-            "suppressOutput": True
-        }, ensure_ascii=False))
-        return
-
-    # Max reached: allow stop
-    print(json.dumps({"continue": True, "suppressOutput": True}, ensure_ascii=False))
-
-if __name__ == "__main__":
-    main()
-"""
-    content = template.replace("__MAX_ASK__", str(int(max_keep_asking))).replace(
-        "__DONE_TOKEN__", json.dumps(done_message, ensure_ascii=False)
-    )
-    script_path.write_text(content, encoding="utf-8")
-    # Make executable
-    st = os.stat(script_path)
-    os.chmod(script_path, st.st_mode | stat.S_IEXEC)
-
-
-def ensure_hooks_config(path: Path, max_keep_asking: int, done_message: str) -> None:
-    """Create or update hooks config ensuring our Stop hook command exists once."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    # 1) Ensure our stop hook script exists (embed current settings)
-    script_path = path.parent / "hooks" / Path(STOP_HOOK_REL_SCRIPT).name
-    _write_stop_hook_script(script_path, max_keep_asking, done_message)
-
-    # 2) Load existing settings JSON
-    data: dict
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    else:
-        data = {}
-
-    hooks = data.get("hooks") or {}
-
-    stop_arr = hooks.get("Stop") or []
-    # Normalize: each item is an object possibly with matcher and hooks
-    if isinstance(stop_arr, dict):
-        stop_arr = [stop_arr]
-
-    # Clean up existing Stop entries:
-    # - remove our command from any existing entry
-    # - drop entries that end up empty or have no valid hooks list
-    # - deduplicate hooks within an entry
-    cleaned_stop_arr: list[dict] = []
-    for entry in stop_arr if isinstance(stop_arr, list) else []:
-        hooks_list = entry.get("hooks") or []
-        if not isinstance(hooks_list, list):
-            hooks_list = []
-        filtered_hooks: list[dict] = []
-        seen: set[tuple] = set()
-        for h in hooks_list:
-            if not isinstance(h, dict):
-                continue
-            if h.get("type") == "command" and h.get("command") == STOP_HOOK_COMMAND:
-                # remove our command from legacy entries; we'll add a single canonical entry later
-                continue
-            key = (h.get("type"), h.get("command"))
-            if key in seen:
-                continue
-            seen.add(key)
-            filtered_hooks.append(h)
-        if filtered_hooks:
-            cleaned_stop_arr.append({**entry, "hooks": filtered_hooks})
-        # if no hooks remain, drop the entry (avoids accumulating empty objects)
-
-    stop_entry = {
-        # No matcher for Stop per reference
-        "hooks": [
-            {
-                "type": "command",
-                "command": STOP_HOOK_COMMAND,
-            }
-        ]
-    }
-
-    # Append our canonical stop entry exactly once at the end
-    cleaned_stop_arr.append(stop_entry)
-    hooks["Stop"] = cleaned_stop_arr
-
-    data["hooks"] = hooks
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+# --- helpers restored after hook removal ---
 
 
 def _args_list(args: str) -> list[str]:
@@ -467,7 +304,6 @@ def run_claude_code(
     debug_log(f"show_output={show_output}, output_format={effective_fmt}")
 
     if show_output:
-        # Stream output to terminal while also allowing JSON parsing by callers if needed
         p_head = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -491,7 +327,6 @@ def run_claude_code(
             except Exception:
                 pass
     else:
-        # Parse JSONL quietly and live-update a status with counts (no usage)
         counts: dict[str, int] = {"system": 0, "assistant": 0, "user": 0}
         allowed = set(counts.keys())
 
@@ -517,7 +352,6 @@ def run_claude_code(
             def _colorize_line_from_plain(line_plain: str) -> str:
                 line_colored = line_plain
                 try:
-                    # Color spinner/check/cross at the start
                     if line_colored.startswith(ch):
                         if ch == "✓":
                             spin_col = color_success(ch)
@@ -527,7 +361,6 @@ def run_claude_code(
                             spin_col = color_info(ch)
                         line_colored = spin_col + line_colored[len(ch) :]
 
-                    # Color the role counts
                     a_tok = f"assistant: {counts['assistant']}"
                     u_tok = f"user: {counts['user']}"
                     s_tok = f"system: {counts['system']}"
@@ -542,13 +375,11 @@ def run_claude_code(
                 return line_colored
 
             if row_updater is not None and row_index is not None and sys.stderr.isatty():
-                # Parallel worktree rendering: single line per worktree
                 line_plain = f"{ch} worktree {row_index + 1} | {_counts_text()}"
                 line_out = _colorize_line_from_plain(line_plain) if COLOR_ENABLED else line_plain
                 row_updater(row_index, line_out, "", final)
                 return
 
-            # Fallback: single-line spinner + counts (no usage)
             counts_part_plain = _counts_text()
             line1_plain = f"{ch} running claude...: {counts_part_plain}"
             try:
@@ -581,7 +412,6 @@ def run_claude_code(
                     pass
                 last_len = len(line1_plain)
 
-        # initial status
         _print_status()
 
         p_head = subprocess.Popen(
@@ -610,7 +440,6 @@ def run_claude_code(
                         _print_status()
                 except Exception as e:
                     debug_log(f"non-json or parse error: {e}")
-                    # ignore non-JSON lines
                     pass
             p_head.wait()
             rc = int(p_head.returncode or 0)
@@ -631,14 +460,216 @@ def run_claude_code(
                 p_head.stdout.close()
             except Exception:
                 pass
-        # finalize status line with a check/cross without moving to a new line
         try:
             marker = "✓" if (not aborted and not errored and rc == 0) else "❌"
             _print_status(prefix_char=marker, final=True)
-            # Keep same line (no newline) to behave like spinner
         except Exception:
             pass
         return rc
+
+
+def run_claude_and_detect(
+    args: str,
+    show_output: bool,
+    env: dict | None = None,
+    cwd: Path | None = None,
+    *,
+    prompt: str,
+    output_format: str = "stream-json",
+    row_updater: Callable[[int, str, str, bool], None] | None = None,
+    row_index: int | None = None,
+    done_token: str,
+) -> tuple[int, bool]:
+    """Run Claude once and detect if done_token appears in the streamed output.
+    Returns (return_code, done_seen).
+    """
+    extra = _args_list(args)
+    cmd: list[str] = ["claude", "-p", prompt]
+
+    provided_fmt = _get_flag_value(extra, "--output-format")
+    effective_fmt = provided_fmt or output_format
+
+    if not provided_fmt:
+        cmd += ["--output-format", output_format]
+
+    if effective_fmt == "stream-json" and not _args_has_flag(extra, "--verbose"):
+        cmd += ["--verbose"]
+
+    cmd += extra
+
+    debug_log(f"running: {' '.join(cmd)}")
+    debug_log(f"cwd={cwd or Path.cwd()}")
+    debug_log(f"show_output={show_output}, output_format={effective_fmt}")
+
+    done_seen = False
+
+    if show_output:
+        p = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env={**os.environ, **(env or {})},
+            cwd=str(cwd) if cwd else None,
+        )
+        assert p.stdout is not None
+        try:
+            for line in p.stdout:
+                if not done_seen and done_token and (done_token in line):
+                    done_seen = True
+                try:
+                    sys.stdout.write(line)
+                except Exception:
+                    pass
+            p.wait()
+            return int(p.returncode or 0), done_seen
+        finally:
+            try:
+                p.stdout.close()
+            except Exception:
+                pass
+    else:
+        counts: dict[str, int] = {"system": 0, "assistant": 0, "user": 0}
+        allowed = set(counts.keys())
+
+        spinner = "|/-\\"
+        spin_idx = 0
+        last_len = 0
+        aborted = False
+        errored = False
+
+        def _counts_text() -> str:
+            return ", ".join(
+                [
+                    f"assistant: {counts['assistant']}",
+                    f"user: {counts['user']}",
+                    f"system: {counts['system']}",
+                ]
+            )
+
+        def _print_status(prefix_char: str | None = None, *, final: bool = False):
+            nonlocal last_len
+            ch = prefix_char if prefix_char is not None else spinner[spin_idx % len(spinner)]
+
+            def _colorize_line_from_plain(line_plain: str) -> str:
+                line_colored = line_plain
+                try:
+                    if line_colored.startswith(ch):
+                        if ch == "✓":
+                            spin_col = color_success(ch)
+                        elif ch == "❌":
+                            spin_col = color_warn(ch)
+                        else:
+                            spin_col = color_info(ch)
+                        line_colored = spin_col + line_colored[len(ch) :]
+
+                    a_tok = f"assistant: {counts['assistant']}"
+                    u_tok = f"user: {counts['user']}"
+                    s_tok = f"system: {counts['system']}"
+                    if a_tok in line_colored:
+                        line_colored = line_colored.replace(a_tok, color_success(a_tok))
+                    if u_tok in line_colored:
+                        line_colored = line_colored.replace(u_tok, color_info(u_tok))
+                    if s_tok in line_colored:
+                        line_colored = line_colored.replace(s_tok, color_warn(s_tok))
+                except Exception:
+                    pass
+                return line_colored
+
+            if row_updater is not None and row_index is not None and sys.stderr.isatty():
+                line_plain = f"{ch} worktree {row_index + 1} | {_counts_text()}"
+                line_out = _colorize_line_from_plain(line_plain) if COLOR_ENABLED else line_plain
+                row_updater(row_index, line_out, "", final)
+                return
+
+            counts_part_plain = _counts_text()
+            line1_plain = f"{ch} running claude...: {counts_part_plain}"
+            try:
+                import shutil as _shutil
+
+                width = max(20, int(_shutil.get_terminal_size((80, 24)).columns))
+            except Exception:
+                width = 80
+            if len(line1_plain) > width:
+                line1_plain = line1_plain[: width - 1]
+
+            if sys.stderr.isatty():
+                try:
+                    line1_out = (
+                        _colorize_line_from_plain(line1_plain) if COLOR_ENABLED else line1_plain
+                    )
+                except Exception:
+                    line1_out = line1_plain
+                try:
+                    sys.stderr.write("\r\x1b[2K" + line1_out)
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+            else:
+                pad = max(0, last_len - len(line1_plain))
+                try:
+                    sys.stderr.write("\r" + line1_plain + (" " * pad))
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+                last_len = len(line1_plain)
+
+        _print_status()
+
+        p_head = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env={**os.environ, **(env or {})},
+            cwd=str(cwd) if cwd else None,
+        )
+        assert p_head.stdout is not None
+        rc = 1
+        try:
+            for line in p_head.stdout:
+                if not done_seen and done_token and (done_token in line):
+                    done_seen = True
+                debug_log(f"line: {line.rstrip()}")
+                dirty = False
+                try:
+                    obj = json.loads(line)
+                    typ = str(obj.get("type", "")).strip()
+                    debug_log(f"parsed type={typ}")
+                    if typ in allowed:
+                        counts[typ] = counts.get(typ, 0) + 1
+                        dirty = True
+                    if dirty:
+                        spin_idx = (spin_idx + 1) % len(spinner)
+                        _print_status()
+                except Exception as e:
+                    debug_log(f"non-json or parse error: {e}")
+                    pass
+            p_head.wait()
+            rc = int(p_head.returncode or 0)
+        except KeyboardInterrupt:
+            aborted = True
+            try:
+                p_head.terminate()
+            except Exception:
+                pass
+            try:
+                p_head.wait(timeout=2)
+            except Exception:
+                pass
+        except Exception:
+            errored = True
+        finally:
+            try:
+                p_head.stdout.close()
+            except Exception:
+                pass
+        try:
+            marker = "✓" if (not aborted and not errored and rc == 0) else "❌"
+            _print_status(prefix_char=marker, final=True)
+        except Exception:
+            pass
+        return rc, done_seen
 
 
 def pr_number_from_url(url: str) -> int | None:
@@ -657,7 +688,6 @@ def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: str | None) -> 
             replacement_suffix = f" [#{num}]({pr_url})"
         else:
             replacement_suffix = f" ({pr_url})"
-    # Be tolerant of trailing spaces after the title in the original TODO line
     pattern = re.compile(rf"^- \[ \] {re.escape(item.title)}\s*$", re.MULTILINE)
     new_text, n = pattern.subn(f"- [x] {item.title}{replacement_suffix}", text, count=1)
     if n:
@@ -669,13 +699,11 @@ def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: str | None) -> 
 def git(*args: str, cwd: Path | None = None) -> str:
     kwargs: dict = {"text": True, "cwd": str(cwd) if cwd else None}
     if not DEBUG_ENABLED:
-        # Suppress stderr (progress/hints) when not debugging
         kwargs["stderr"] = subprocess.DEVNULL
     return subprocess.check_output(["git", *args], **kwargs).strip()
 
 
 def git_call(args: list[str], cwd: Path | None = None) -> None:
-    # Suppress stdout/stderr from git when not debugging
     kwargs: dict = {"cwd": str(cwd) if cwd else None}
     if not DEBUG_ENABLED:
         kwargs["stdout"] = subprocess.DEVNULL
@@ -684,7 +712,6 @@ def git_call(args: list[str], cwd: Path | None = None) -> None:
 
 
 def is_git_ignored(path: Path, cwd: Path | None = None) -> bool:
-    """Return True if path is ignored by git according to ignore rules."""
     spath = str(path)
     if cwd:
         try:
@@ -701,7 +728,6 @@ def is_git_ignored(path: Path, cwd: Path | None = None) -> bool:
 
 
 def _warn_if_worktrees_not_ignored(root: Path, *, lang: str) -> None:
-    """Warn user to add .worktrees to .gitignore if it's not ignored."""
     wt = root / ".worktrees"
     try:
         if not is_git_ignored(wt, cwd=root):
@@ -717,7 +743,6 @@ def _warn_if_worktrees_not_ignored(root: Path, *, lang: str) -> None:
                 )
             echo(color_warn(msg))
     except Exception:
-        # best-effort warning only
         pass
 
 
@@ -965,37 +990,45 @@ def process_one_todo(
             lang=cfg.lang,
         )
 
-    hooks_path = (cwd or Path.cwd()) / cfg.hooks_config
-    ensure_hooks_config(hooks_path, cfg.max_keep_asking, cfg.task_done_message)
-
-    # Build headless prompt from item
     children_bullets = "\n".join([f"- {c}" for c in item.children]) if item.children else "- (none)"
-    prompt = cfg.headless_prompt_template.format(
+    base_prompt = cfg.headless_prompt_template.format(
         title=item.title,
         children_bullets=children_bullets,
         done_token=cfg.task_done_message,
     )
 
-    # Always run Claude (dry-run option removed)
-    try:
-        rc = run_claude_code(
-            cfg.claude_args,
-            cfg.show_claude_output,
-            cwd=cwd or Path.cwd(),
-            prompt=prompt,
-            output_format=cfg.headless_output_format,
-            row_updater=row_updater,
-            row_index=row_index,
-        )
-    except FileNotFoundError:
-        echo(tr("claude_not_found", cfg.lang), err=True)
-        raise typer.Exit(code=1) from None
-    if rc != 0:
-        echo(tr("claude_failed", cfg.lang, code=rc), err=True)
-        raise typer.Exit(code=1)
+    # Run Claude and bounce up to max_keep_asking times if DONE token not seen
+    attempts = 0
+    done_seen = False
+    prompt_current = base_prompt
+    while True:
+        try:
+            rc, seen = run_claude_and_detect(
+                cfg.claude_args,
+                cfg.show_claude_output,
+                cwd=cwd or Path.cwd(),
+                prompt=prompt_current,
+                output_format=cfg.headless_output_format,
+                row_updater=row_updater,
+                row_index=row_index,
+                done_token=cfg.task_done_message,
+            )
+        except FileNotFoundError:
+            echo(tr("claude_not_found", cfg.lang), err=True)
+            raise typer.Exit(code=1) from None
+        if rc != 0:
+            echo(tr("claude_failed", cfg.lang, code=rc), err=True)
+            raise typer.Exit(code=1)
+        done_seen = seen or done_seen
+        if done_seen:
+            break
+        if attempts >= max(0, int(cfg.max_keep_asking)):
+            break
+        # Bounce with follow-up instruction (Japanese)
+        prompt_current = f"続けて。実装が終了し終わっていたら、{cfg.task_done_message}と返して。"
+        attempts += 1
 
     commit_msg = f"{cfg.git_commit_message_prefix}{item.title}"
-    # Exclude TODO list file from the main code commit
     _commit_and_push_filtered(
         commit_msg,
         branch,
@@ -1009,14 +1042,11 @@ def process_one_todo(
         if cfg.pr_urls is not None:
             cfg.pr_urls.append(pr_url)
     else:
-        # still collect placeholder for reporting
         if cfg.pr_urls is not None:
             cfg.pr_urls.append("")
 
-    # Update TODO.md with PR link; do not commit it (it's git-ignored)
     todo_path = (cwd or Path.cwd()) / cfg.input_path
     if update_todo_with_pr(todo_path, item, pr_url):
-        # No commit for TODO.md because it's ignored
         pass
 
     return pr_url
@@ -1167,7 +1197,6 @@ def run(
     config_path: str = typer.Option(".claude-manager.toml", "--config", "-f"),
     input_path: str = typer.Option("TODO.md", "--input", "-i"),
     claude_args: str = typer.Option("--dangerously-skip-permissions", "--claude-args"),
-    hooks_config: str = typer.Option(".claude/settings.local.json", "--hooks-config"),
     max_keep_asking: int = typer.Option(3, "--max-keep-asking"),
     task_done_message: str = typer.Option("CLAUDE_MANAGER_DONE", "--task-done-message"),
     show_claude_output: bool = typer.Option(False, "--show-claude-output"),
@@ -1204,7 +1233,6 @@ def run(
         config_path=config_path,
         input_path=input_path,
         claude_args=claude_args,
-        hooks_config=hooks_config,
         max_keep_asking=max_keep_asking,
         task_done_message=task_done_message,
         show_claude_output=show_claude_output,
@@ -1241,16 +1269,10 @@ def run(
 
     if doctor:
         echo(tr("doctor_validating", cfg.lang))
-        hooks_abspath = root / cfg.hooks_config
         todo_abspath = root / cfg.input_path
         echo(tr("base_branch", cfg.lang, branch=cfg.git_base_branch))
 
         ok = True
-        if hooks_abspath.exists():
-            echo(tr("hooks_file_exists", cfg.lang, path=str(hooks_abspath)))
-        else:
-            echo(tr("hooks_file_missing", cfg.lang, path=str(hooks_abspath)), err=True)
-            ok = False
 
         if todo_abspath.exists():
             echo(tr("todo_file_exists", cfg.lang, path=str(todo_abspath)))
