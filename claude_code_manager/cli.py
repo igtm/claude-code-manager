@@ -30,9 +30,7 @@ def echo(msg: str, err: bool = False):
 
 @APP.callback()
 def _version_callback(
-    version: bool = typer.Option(
-        False, "--version", "-v", help="Show version and exit"
-    ),
+    version: bool = typer.Option(False, "--version", "-v", help="Show version and exit"),
 ):
     if version:
         echo(__version__)
@@ -100,9 +98,7 @@ STOP_HOOK_REL_SCRIPT = ".claude/hooks/stop-keep-asking.py"
 STOP_HOOK_COMMAND = f"$CLAUDE_PROJECT_DIR/{STOP_HOOK_REL_SCRIPT}"
 
 
-def _write_stop_hook_script(
-    script_path: Path, max_keep_asking: int, done_message: str
-) -> None:
+def _write_stop_hook_script(script_path: Path, max_keep_asking: int, done_message: str) -> None:
     script_path.parent.mkdir(parents=True, exist_ok=True)
     content = f"""#!/usr/bin/env python3
 import json, sys, os, io
@@ -273,23 +269,97 @@ def run_claude_code(
 
 
 def git(*args: str, cwd: Optional[Path] = None) -> str:
-    return subprocess.check_output(
-        ["git", *args], text=True, cwd=str(cwd) if cwd else None
-    ).strip()
+    return subprocess.check_output(["git", *args], text=True, cwd=str(cwd) if cwd else None).strip()
 
 
 def git_call(args: list[str], cwd: Optional[Path] = None) -> None:
     subprocess.check_call(["git", *args], cwd=str(cwd) if cwd else None)
 
 
-def ensure_branch(base: str, name: str, cwd: Optional[Path] = None) -> None:
+def _list_tracked_changes(cwd: Optional[Path] = None) -> set[str]:
+    changed: set[str] = set()
+    try:
+        out_wt = git("diff", "--name-only", cwd=cwd)
+        if out_wt:
+            for line in out_wt.splitlines():
+                if line.strip():
+                    changed.add(line.strip())
+    except Exception:
+        pass
+    try:
+        out_index = git("diff", "--cached", "--name-only", cwd=cwd)
+        if out_index:
+            for line in out_index.splitlines():
+                if line.strip():
+                    changed.add(line.strip())
+    except Exception:
+        pass
+    return changed
+
+
+def ensure_branch(
+    base: str,
+    name: str,
+    cwd: Optional[Path] = None,
+    prefer_local_todo: bool = True,
+    todo_relpath: str = "TODO.md",
+) -> None:
     git("fetch", "--all", cwd=cwd)
+
+    # Check for local changes (excluding TODO.md) before switching branches
+    changed = _list_tracked_changes(cwd=cwd)
+    # Normalize relative paths for comparison
+    todo_rel_norm = todo_relpath.replace("\\", "/")
+    changed_excl_todo = {p for p in changed if p.replace("\\", "/") != todo_rel_norm}
+    if changed_excl_todo:
+        echo("Uncommitted changes detected (excluding TODO.md):", err=True)
+        for p in sorted(changed_excl_todo):
+            echo(f"  - {p}", err=True)
+        echo("Please commit or stash your changes before switching branches.", err=True)
+        echo("Hint: git add -A && git commit -m 'WIP'  or  git stash -u", err=True)
+        raise typer.Exit(code=1)
+
+    # Optionally stash local TODO.md before switching
+    stashed = False
+    if prefer_local_todo:
+        try:
+            # Stash only TODO.md if modified
+            git(
+                "stash",
+                "push",
+                "-m",
+                "claude-manager: TODO.md",
+                "--",
+                todo_relpath,
+                cwd=cwd,
+            )
+            stashed = True
+        except Exception:
+            stashed = False
+
     git("checkout", base, cwd=cwd)
+    git("pull", cwd=cwd)
     try:
         git("checkout", "-b", name, cwd=cwd)
     except subprocess.CalledProcessError:
         git("checkout", name, cwd=cwd)
         git("rebase", base, cwd=cwd)
+
+    # Re-apply stashed TODO.md so local changes take precedence
+    if stashed:
+        try:
+            git("stash", "pop", cwd=cwd)
+        except Exception:
+            # If conflict occurs, keep local version
+            try:
+                subprocess.check_call(
+                    ["git", "checkout", "--ours", todo_relpath],
+                    cwd=str(cwd) if cwd else None,
+                )
+                subprocess.check_call(["git", "add", todo_relpath], cwd=str(cwd) if cwd else None)
+                # Do not commit here; later flow will commit when updating TODO
+            except Exception:
+                pass
 
 
 def commit_and_push(message: str, branch: str, cwd: Optional[Path] = None):
@@ -316,9 +386,9 @@ def pr_number_from_url(url: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: Optional[str]) -> None:
+def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: Optional[str]) -> bool:
     if not todo_path.exists():
-        return
+        return False
     text = todo_path.read_text(encoding="utf-8")
     replacement_suffix = ""
     if pr_url:
@@ -331,19 +401,25 @@ def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: Optional[str]) 
     new_text, n = pattern.subn(f"- [x] {item.title}{replacement_suffix}", text, count=1)
     if n:
         todo_path.write_text(new_text, encoding="utf-8")
+        return True
+    return False
 
 
 def process_one_todo(item: TodoItem, cfg: Config, cwd: Optional[Path] = None) -> None:
     branch = f"{cfg.git_branch_prefix}{slugify(item.title)}"
-    ensure_branch(cfg.git_base_branch, branch, cwd=cwd)
+    ensure_branch(
+        cfg.git_base_branch,
+        branch,
+        cwd=cwd,
+        prefer_local_todo=True,
+        todo_relpath=cfg.input_path,
+    )
 
     hooks_path = (cwd or Path.cwd()) / cfg.hooks_config
     ensure_hooks_config(hooks_path, cfg.max_keep_asking, cfg.task_done_message)
 
     if not cfg.dry_run:
-        rc = run_claude_code(
-            cfg.claude_args, cfg.show_claude_output, cwd=cwd or Path.cwd()
-        )
+        rc = run_claude_code(cfg.claude_args, cfg.show_claude_output, cwd=cwd or Path.cwd())
         if rc != 0:
             raise RuntimeError(f"claude exited with {rc}")
 
@@ -355,7 +431,10 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Optional[Path] = None) ->
     if pr_url:
         echo(f"PR created: {pr_url}")
 
-    update_todo_with_pr((cwd or Path.cwd()) / cfg.input_path, item, pr_url)
+    # Update TODO.md with PR link and commit so working tree stays clean
+    todo_path = (cwd or Path.cwd()) / cfg.input_path
+    if update_todo_with_pr(todo_path, item, pr_url):
+        commit_and_push(f"{cfg.git_commit_message_prefix}{item.title} [todo]", branch, cwd=cwd)
 
 
 def slugify(text: str) -> str:
@@ -389,6 +468,14 @@ def process_in_worktree(root: Path, item: TodoItem, cfg: Config) -> None:
     git("fetch", cwd=root)
     # Create the worktree bound to branch based on base branch tip
     git("worktree", "add", "-B", branch, str(wt_path), cfg.git_base_branch, cwd=root)
+    # After creating worktree, ensure branch logic inside that tree respects local TODO
+    ensure_branch(
+        cfg.git_base_branch,
+        branch,
+        cwd=wt_path,
+        prefer_local_todo=True,
+        todo_relpath=cfg.input_path,
+    )
 
     # Now process inside the worktree path
     process_one_todo(item, cfg, cwd=wt_path)
@@ -398,13 +485,9 @@ def process_in_worktree(root: Path, item: TodoItem, cfg: Config) -> None:
 def run(
     cooldown: int = typer.Option(0, "--cooldown", "-c"),
     git_branch_prefix: str = typer.Option("todo/", "--git-branch-prefix", "-b"),
-    git_commit_message_prefix: str = typer.Option(
-        "feat: ", "--git-commit-message-prefix", "-m"
-    ),
+    git_commit_message_prefix: str = typer.Option("feat: ", "--git-commit-message-prefix", "-m"),
     git_base_branch: str = typer.Option("main", "--git-base-branch", "-g"),
-    github_pr_title_prefix: str = typer.Option(
-        "feat: ", "--github-pr-title-prefix", "-t"
-    ),
+    github_pr_title_prefix: str = typer.Option("feat: ", "--github-pr-title-prefix", "-t"),
     github_pr_body_template: str = typer.Option(
         "Implementing TODO item: {todo_item}", "--github-pr-body-template", "-p"
     ),
@@ -418,9 +501,7 @@ def run(
     dry_run: bool = typer.Option(False, "--dry-run", "-d"),
     doctor: bool = typer.Option(False, "--doctor", "-D"),
     worktree_parallel: bool = typer.Option(False, "--worktree-parallel", "-w"),
-    worktree_parallel_max_semaphore: int = typer.Option(
-        1, "--worktree-parallel-max-semaphore"
-    ),
+    worktree_parallel_max_semaphore: int = typer.Option(1, "--worktree-parallel-max-semaphore"),
 ):
     cfg = Config(
         cooldown=cooldown,
@@ -501,9 +582,7 @@ def run(
         max_workers = max(1, int(cfg.worktree_parallel_max_semaphore))
         echo(f"Running in worktree-parallel mode with {max_workers} workers...")
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [
-                ex.submit(process_in_worktree, root, item, cfg) for item in items
-            ]
+            futures = [ex.submit(process_in_worktree, root, item, cfg) for item in items]
             for fut in as_completed(futures):
                 exc = fut.exception()
                 if exc:

@@ -33,7 +33,5 @@ def test_ensure_hooks_config_dedup(tmp_path: Path):
             if isinstance(h, dict) and h.get("type") == "command":
                 commands.append(h.get("command"))
     # Our command should appear exactly once
-    unique = [
-        c for c in commands if c and c.endswith(".claude/hooks/stop-keep-asking.py")
-    ]
+    unique = [c for c in commands if c and c.endswith(".claude/hooks/stop-keep-asking.py")]
     assert len(unique) == 1
