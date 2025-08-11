@@ -117,16 +117,17 @@ def debug_log(msg: str) -> None:
 
 
 class LiveRows:
-    """Simple multi-row live renderer for TTY. Each row has two lines."""
+    """Simple multi-row live renderer for TTY. Each row can have 1 or 2 lines."""
 
-    def __init__(self, rows: int):
+    def __init__(self, rows: int, lines_per_row: int = 2):
         self.rows = int(rows)
+        self.lines_per_row = 1 if int(lines_per_row) == 1 else 2
         self.lines: list[tuple[str, str, bool]] = [("", "", False) for _ in range(self.rows)]
         self._lock = threading.Lock()
         self._initialized = False
 
     def _draw(self):
-        total_lines = self.rows * 2
+        total_lines = self.rows * self.lines_per_row
         try:
             if not self._initialized:
                 # Allocate lines once
@@ -145,7 +146,10 @@ class LiveRows:
             for i in range(self.rows):
                 l1, l2, _ = self.lines[i]
                 sys.stderr.write("\r\x1b[2K" + (l1 or ""))
-                sys.stderr.write("\n\x1b[2K" + (l2 or ""))
+                if self.lines_per_row == 2:
+                    sys.stderr.write("\n\x1b[2K" + (l2 or ""))
+                else:
+                    sys.stderr.write("\n")
 
             # Leave cursor at bottom of block
             sys.stderr.flush()
@@ -485,38 +489,37 @@ def run_claude_code(
             except Exception:
                 pass
     else:
-        # Parse JSONL quietly and live-update a one-line status with counts and usage
+        # Parse JSONL quietly and live-update a status with counts (no usage)
         counts: dict[str, int] = {"system": 0, "assistant": 0, "user": 0}
         allowed = set(counts.keys())
-        usage_totals: dict[str, int] = {}
 
         spinner = "|/-\\"
         spin_idx = 0
         last_len = 0
 
-        def _print_status(prefix_char: str | None = None, *, final: bool = False):
-            nonlocal last_len
-            ch = prefix_char if prefix_char is not None else spinner[spin_idx % len(spinner)]
-
-            # Build plain text parts for width calculation (avoid ANSI when measuring)
-            counts_part_plain = ", ".join(
+        def _counts_text() -> str:
+            return ", ".join(
                 [
                     f"assistant: {counts['assistant']}",
                     f"user: {counts['user']}",
                     f"system: {counts['system']}",
                 ]
             )
-            usage_part_plain = ""
-            if usage_totals:
-                usage_part_plain = ", ".join(
-                    f"{k}: {usage_totals[k]}" for k in sorted(usage_totals.keys())
-                )
-                usage_part_plain = f"usage: {usage_part_plain}"
 
+        def _print_status(prefix_char: str | None = None, *, final: bool = False):
+            nonlocal last_len
+            ch = prefix_char if prefix_char is not None else spinner[spin_idx % len(spinner)]
+
+            if row_updater is not None and row_index is not None and sys.stderr.isatty():
+                # Parallel worktree rendering: single line per worktree, no color, no usage
+                head = "✓" if final else "<loading>"
+                line = f"{head} worktree {row_index + 1} | {_counts_text()}"
+                row_updater(row_index, line, "", final)
+                return
+
+            # Fallback: single-line spinner + counts (no usage)
+            counts_part_plain = _counts_text()
             line1_plain = f"{ch} running claude...: {counts_part_plain}"
-            line2_plain = usage_part_plain
-
-            # Truncate to terminal width
             try:
                 import shutil as _shutil
 
@@ -525,73 +528,30 @@ def run_claude_code(
                 width = 80
             if len(line1_plain) > width:
                 line1_plain = line1_plain[: width - 1]
-            if line2_plain and len(line2_plain) > width:
-                line2_plain = line2_plain[: width - 1]
 
-            def _colorize_line_from_plain(line_plain: str) -> str:
-                # Replace known tokens with colored equivalents so printable length stays identical
-                line_colored = line_plain
+            if sys.stderr.isatty():
+                # Optional colorization for spinner only
                 try:
                     spinner_col = color_success(ch) if ch == "✓" else color_info(ch)
-                    if line_colored.startswith(ch):
-                        line_colored = spinner_col + line_colored[len(ch) :]
-
-                    a_tok = f"assistant: {counts['assistant']}"
-                    u_tok = f"user: {counts['user']}"
-                    s_tok = f"system: {counts['system']}"
-                    if a_tok in line_colored:
-                        line_colored = line_colored.replace(a_tok, color_success(a_tok))
-                    if u_tok in line_colored:
-                        line_colored = line_colored.replace(u_tok, color_info(u_tok))
-                    if s_tok in line_colored:
-                        line_colored = line_colored.replace(s_tok, color_warn(s_tok))
-
-                    if "usage:" in line_colored:
-                        line_colored = line_colored.replace("usage:", color_info("usage:"))
-                    for k in sorted(usage_totals.keys()):
-                        tok = f"{k}: {usage_totals[k]}"
-                        if tok in line_colored:
-                            line_colored = line_colored.replace(tok, color_debug(tok))
+                    if line1_plain.startswith(ch):
+                        line1_out = spinner_col + line1_plain[len(ch) :]
+                    else:
+                        line1_out = line1_plain
                 except Exception:
-                    pass
-                return line_colored
-
-            line1_out = (
-                _colorize_line_from_plain(line1_plain) if sys.stderr.isatty() else line1_plain
-            )
-            line2_out = (
-                _colorize_line_from_plain(line2_plain)
-                if (sys.stderr.isatty() and line2_plain)
-                else line2_plain
-            )
-
-            if row_updater is not None and row_index is not None and sys.stderr.isatty():
-                row_updater(row_index, line1_out, line2_out or "", final)
-                return
-
-            # fallback to per-process rendering
-            if sys.stderr.isatty():
-                # Two-line TTY status
+                    line1_out = line1_plain
                 try:
                     sys.stderr.write("\r\x1b[2K" + line1_out)
-                    sys.stderr.write("\n\x1b[2K" + (line2_out or ""))
-                    if not final:
-                        sys.stderr.write("\x1b[1A")
                     sys.stderr.flush()
                 except Exception:
                     pass
             else:
-                # Non-TTY single line
-                combined_plain = line1_plain
-                if line2_plain:
-                    combined_plain = combined_plain + " | " + line2_plain
-                pad = max(0, last_len - len(combined_plain))
+                pad = max(0, last_len - len(line1_plain))
                 try:
-                    sys.stderr.write("\r" + combined_plain + (" " * pad))
+                    sys.stderr.write("\r" + line1_plain + (" " * pad))
                     sys.stderr.flush()
                 except Exception:
                     pass
-                last_len = len(combined_plain)
+                last_len = len(line1_plain)
 
         # initial status
         _print_status()
@@ -616,23 +576,6 @@ def run_claude_code(
                     if typ in allowed:
                         counts[typ] = counts.get(typ, 0) + 1
                         dirty = True
-                    # Collect usage totals dynamically
-                    maybe_usage = None
-                    msg_obj = obj.get("message")
-                    if isinstance(msg_obj, dict):
-                        mu = msg_obj.get("usage")
-                        if isinstance(mu, dict):
-                            maybe_usage = mu
-                    if maybe_usage is None and isinstance(obj.get("usage"), dict):
-                        maybe_usage = obj.get("usage")
-                    if isinstance(maybe_usage, dict):
-                        for k, v in maybe_usage.items():
-                            try:
-                                usage_totals[k] = usage_totals.get(k, 0) + int(v)
-                                dirty = True
-                            except Exception:
-                                # ignore non-numeric
-                                pass
                     if dirty:
                         spin_idx = (spin_idx + 1) % len(spinner)
                         _print_status()
@@ -1147,8 +1090,7 @@ def run(
         max_workers = max(1, int(cfg.worktree_parallel_max_semaphore))
         echo(tr("running_parallel", cfg.lang, workers=max_workers))
         _warn_if_worktrees_not_ignored(root, lang=cfg.lang)
-        # Prepare live rows for TTY
-        live = LiveRows(len(items)) if sys.stderr.isatty() else None
+        live = LiveRows(len(items), lines_per_row=1) if sys.stderr.isatty() else None
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [
                 ex.submit(
@@ -1167,12 +1109,10 @@ def run(
                     raise exc
         if live:
             live.finish()
-        # After parallel run, return to base branch in root (best-effort)
         try:
             git("checkout", cfg.git_base_branch, cwd=root)
         except Exception:
             pass
-        # After parallel run, print final report
         _print_final_report(cfg)
         return
 
