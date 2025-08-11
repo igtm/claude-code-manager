@@ -73,7 +73,7 @@ def echo(msg: str, err: bool = False):
         except NameError:
             # COLOR_ENABLED not initialized yet
             pass
-    print(msg, file=stream)
+    print(msg, file=stream, flush=True)
 
 
 # --- simple color helpers ---
@@ -465,10 +465,10 @@ def run_claude_code(
                 p_head.stdout.close()
             except Exception:
                 pass
-        # Print summary of response types (only system/assistant/user)
-        echo(color_info("Claude response summary:"))
+        # Print summary of response types (only system/assistant/user) to stderr for visibility
+        echo(color_info("Claude response summary:"), err=True)
         for k in ("system", "assistant", "user"):
-            echo(f"  - {k}: {counts.get(k, 0)}")
+            echo(f"  - {k}: {counts.get(k, 0)}", err=True)
         return rc
 
 
@@ -610,7 +610,7 @@ def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: str | None) -> 
         else:
             replacement_suffix = f" ({pr_url})"
     # Be tolerant of trailing spaces after the title in the original TODO line
-    pattern = re.compile(rf"^- \[ \] {re.escape(item.title)}\s*$", re.MULTILINE)
+    pattern = re.compile(rf"^- \\[ \\] {re.escape(item.title)}\s*$", re.MULTILINE)
     new_text, n = pattern.subn(f"- [x] {item.title}{replacement_suffix}", text, count=1)
     if n:
         todo_path.write_text(new_text, encoding="utf-8")
