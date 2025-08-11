@@ -1,9 +1,5 @@
 # Claude Code Manager
 
-<div align="right">
-  <a href="README.md">English</a> | <a href="i18n/README.ja.md">日本語</a>
-</div>
-
 <div align="center">
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
