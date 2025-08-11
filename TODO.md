@@ -1,2 +1,2 @@
-- [ ] README.md をよりリッチにする。上位の有名なライブラリのREADME.mdポイ感じにする。
+- [x] README.md をよりリッチにする。上位の有名なライブラリのREADME.mdポイ感じにする。 [#1](https://github.com/igtm/claude-code-manager/pull/1)
 - [ ] README.md を i18n 化する
