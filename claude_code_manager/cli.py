@@ -432,9 +432,35 @@ def run_claude_code(
             except Exception:
                 pass
     else:
-        # Parse JSONL quietly and discard raw logs, then print a simple summary
+        # Parse JSONL quietly and live-update a one-line status with counts
         counts: dict[str, int] = {"system": 0, "assistant": 0, "user": 0}
         allowed = set(counts.keys())
+
+        spinner = "|/-\\"
+        spin_idx = 0
+        last_len = 0
+
+        def _print_status(prefix_char: str | None = None):
+            nonlocal last_len
+            ch = prefix_char if prefix_char is not None else spinner[spin_idx % len(spinner)]
+            msg = f"{ch} running claude...: " + ", ".join(
+                [
+                    f"assistant: {counts['assistant']}",
+                    f"user: {counts['user']}",
+                    f"system: {counts['system']}",
+                ]
+            )
+            pad = max(0, last_len - len(msg))
+            try:
+                sys.stderr.write("\r" + msg + (" " * pad))
+                sys.stderr.flush()
+            except Exception:
+                pass
+            last_len = len(msg)
+
+        # initial status
+        _print_status()
+
         p_head = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -447,13 +473,14 @@ def run_claude_code(
         try:
             for line in p_head.stdout:
                 debug_log(f"line: {line.rstrip()}")
-                # Do not echo; only parse
                 try:
                     obj = json.loads(line)
                     typ = str(obj.get("type", "")).strip()
                     debug_log(f"parsed type={typ}")
                     if typ in allowed:
                         counts[typ] = counts.get(typ, 0) + 1
+                        spin_idx = (spin_idx + 1) % len(spinner)
+                        _print_status()
                 except Exception as e:
                     debug_log(f"non-json or parse error: {e}")
                     # ignore non-JSON lines
@@ -465,10 +492,13 @@ def run_claude_code(
                 p_head.stdout.close()
             except Exception:
                 pass
-        # Print summary of response types (only system/assistant/user) to stderr for visibility
-        echo(color_info("Claude response summary:"), err=True)
-        for k in ("system", "assistant", "user"):
-            echo(f"  - {k}: {counts.get(k, 0)}", err=True)
+        # finalize status line with a check mark and newline
+        try:
+            _print_status(prefix_char="✓")
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
         return rc
 
 
