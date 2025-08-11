@@ -835,6 +835,10 @@ def load_config_toml(path: Path) -> dict:
         return {}
 
 
+# Serialize concurrent updates to the root TODO file
+TODO_UPDATE_LOCK = threading.Lock()
+
+
 def process_one_todo(
     item: TodoItem,
     cfg: Config,
@@ -844,7 +848,7 @@ def process_one_todo(
     branch_name: str | None = None,
     row_updater: Callable[[int, str, str, bool], None] | None = None,
     row_index: int | None = None,
-) -> None:
+) -> str | None:
     branch = branch_name or f"{cfg.git_branch_prefix}{slugify(item.title)}"
     if not skip_branch_ensure:
         ensure_branch(
@@ -911,6 +915,8 @@ def process_one_todo(
         # No commit for TODO.md because it's ignored
         pass
 
+    return pr_url
+
 
 def process_in_worktree(
     root: Path,
@@ -945,7 +951,7 @@ def process_in_worktree(
     git("worktree", "add", "-B", branch, str(wt_path), cfg.git_base_branch, cwd=root)
 
     # Do NOT switch to base/main inside the worktree; it's already on the new branch
-    process_one_todo(
+    pr_url = process_one_todo(
         item,
         cfg,
         cwd=wt_path,
@@ -954,6 +960,14 @@ def process_in_worktree(
         row_updater=row_updater,
         row_index=row_index,
     )
+
+    # After worktree completes, update the ROOT TODO.md with a check and PR URL
+    try:
+        with TODO_UPDATE_LOCK:
+            update_todo_with_pr(root / cfg.input_path, item, pr_url)
+    except Exception:
+        # Best-effort; ignore errors updating the shared TODO
+        pass
 
 
 def _print_final_report(cfg: Config) -> None:
@@ -1162,7 +1176,7 @@ def run(
 
     for idx, item in enumerate(items):
         echo(color_info(tr("processing", cfg.lang, title=item.title)))
-        process_one_todo(item, cfg, cwd=root)
+        _ = process_one_todo(item, cfg, cwd=root)
         if idx < len(items) - 1 and cfg.cooldown > 0:
             time.sleep(cfg.cooldown)
 
