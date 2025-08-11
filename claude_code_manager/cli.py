@@ -802,10 +802,13 @@ def commit_and_push(message: str, branch: str, cwd: Path | None = None):
 def create_pr(title: str, body: str, cwd: Path | None = None) -> str | None:
     # Try gh CLI if available
     try:
+        kwargs: dict = {"text": True, "cwd": str(cwd) if cwd else None}
+        if not DEBUG_ENABLED:
+            # Suppress gh progress and other noise on stderr when not debugging
+            kwargs["stderr"] = subprocess.DEVNULL
         out = subprocess.check_output(
             ["gh", "pr", "create", "--title", title, "--body", body, "--fill"],
-            text=True,
-            cwd=str(cwd) if cwd else None,
+            **kwargs,
         )
         return out.strip()
     except Exception:
