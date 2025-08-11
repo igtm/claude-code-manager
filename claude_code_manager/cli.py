@@ -645,3 +645,510 @@ def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: str | None) -> 
         todo_path.write_text(new_text, encoding="utf-8")
         return True
     return False
+
+
+def git(*args: str, cwd: Path | None = None) -> str:
+    return subprocess.check_output(["git", *args], text=True, cwd=str(cwd) if cwd else None).strip()
+
+
+def git_call(args: list[str], cwd: Path | None = None) -> None:
+    subprocess.check_call(["git", *args], cwd=str(cwd) if cwd else None)
+
+
+def is_git_ignored(path: Path, cwd: Path | None = None) -> bool:
+    """Return True if path is ignored by git according to ignore rules."""
+    spath = str(path)
+    if cwd:
+        try:
+            spath = os.path.relpath(path, cwd)
+        except Exception:
+            spath = str(path)
+    res = subprocess.run(
+        ["git", "check-ignore", "-q", "--", spath],
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return res.returncode == 0
+
+
+def _warn_if_worktrees_not_ignored(root: Path, *, lang: str) -> None:
+    """Warn user to add .worktrees to .gitignore if it's not ignored."""
+    wt = root / ".worktrees"
+    try:
+        if not is_git_ignored(wt, cwd=root):
+            if (lang or "").lower().startswith("ja"):
+                msg = (
+                    "⚠️ .worktrees が .gitignore に含まれていません。"
+                    "git worktree 並列モードでは '.worktrees/' を .gitignore に追加してください。"
+                )
+            else:
+                msg = (
+                    "⚠️ .worktrees is not in .gitignore. "
+                    "For worktree parallel mode, add '.worktrees/' to .gitignore."
+                )
+            echo(color_warn(msg))
+    except Exception:
+        # best-effort warning only
+        pass
+
+
+def _list_tracked_changes(cwd: Path | None = None) -> set[str]:
+    changed: set[str] = set()
+    try:
+        out_wt = git("diff", "--name-only", cwd=cwd)
+        if out_wt:
+            for line in out_wt.splitlines():
+                if line.strip():
+                    changed.add(line.strip())
+    except Exception:
+        pass
+    try:
+        out_index = git("diff", "--cached", "--name-only", cwd=cwd)
+        if out_index:
+            for line in out_index.splitlines():
+                if line.strip():
+                    changed.add(line.strip())
+    except Exception:
+        pass
+    return changed
+
+
+def ensure_branch(
+    base: str,
+    name: str,
+    cwd: Path | None = None,
+    prefer_local_todo: bool = True,  # kept for backward-compat; no longer used
+    todo_relpath: str = "TODO.md",  # kept for backward-compat; no longer used
+    *,
+    lang: str = "en",
+) -> None:
+    git("fetch", "--all", cwd=cwd)
+
+    # Check for any local tracked changes before switching branches
+    changed = _list_tracked_changes(cwd=cwd)
+    if changed:
+        echo(tr("uncommitted_changes", lang), err=True)
+        for p in sorted(changed):
+            echo(f"  - {p}", err=True)
+        echo(tr("uncommitted_hint", lang), err=True)
+        echo(tr("uncommitted_hint2", lang), err=True)
+        raise typer.Exit(code=1)
+
+    git("checkout", base, cwd=cwd)
+    try:
+        git("checkout", "-b", name, cwd=cwd)
+    except subprocess.CalledProcessError:
+        git("checkout", name, cwd=cwd)
+        git("rebase", base, cwd=cwd)
+
+
+def _commit_and_push_filtered(
+    message: str,
+    branch: str,
+    cwd: Path | None = None,
+    include_paths: list[str] | None = None,  # kept for compatibility; ignored
+    exclude_paths: list[str] | None = None,
+) -> None:
+    # Stage everything, then unstage excluded paths if any
+    git_call(["add", "-A"], cwd=cwd)
+    if exclude_paths:
+        for p in exclude_paths:
+            try:
+                git_call(["reset", "HEAD", "--", p], cwd=cwd)
+            except Exception:
+                pass
+
+    # If nothing staged, skip commit/push
+    try:
+        staged = git("diff", "--cached", "--name-only", cwd=cwd)
+    except Exception:
+        staged = ""
+    if not staged.strip():
+        return
+
+    git_call(["commit", "-m", message], cwd=cwd)
+    git_call(["push", "-u", "origin", branch], cwd=cwd)
+
+
+def commit_and_push(message: str, branch: str, cwd: Path | None = None):
+    # Backward-compatible default: stage everything and push
+    _commit_and_push_filtered(message, branch, cwd=cwd)
+
+
+def create_pr(title: str, body: str, cwd: Path | None = None) -> str | None:
+    # Try gh CLI if available
+    try:
+        out = subprocess.check_output(
+            ["gh", "pr", "create", "--title", title, "--body", body, "--fill"],
+            text=True,
+            cwd=str(cwd) if cwd else None,
+        )
+        return out.strip()
+    except Exception:
+        return None
+
+
+def slugify(text: str) -> str:
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9-_]+", "-", text)
+    slug = re.sub(r"-+", "-", text).strip("-")
+    # Add 6 random alphanumeric chars for uniqueness
+    rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"{slug}-{rand}"
+
+
+def load_config_toml(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        import tomllib  # Python 3.11+
+
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def process_one_todo(
+    item: TodoItem,
+    cfg: Config,
+    cwd: Path | None = None,
+    *,
+    skip_branch_ensure: bool = False,
+    branch_name: str | None = None,
+    row_updater: Callable[[int, str, str, bool], None] | None = None,
+    row_index: int | None = None,
+) -> None:
+    branch = branch_name or f"{cfg.git_branch_prefix}{slugify(item.title)}"
+    if not skip_branch_ensure:
+        ensure_branch(
+            cfg.git_base_branch,
+            branch,
+            cwd=cwd,
+            prefer_local_todo=True,
+            todo_relpath=cfg.input_path,
+            lang=cfg.lang,
+        )
+
+    hooks_path = (cwd or Path.cwd()) / cfg.hooks_config
+    ensure_hooks_config(hooks_path, cfg.max_keep_asking, cfg.task_done_message)
+
+    # Build headless prompt from item
+    children_bullets = "\n".join([f"- {c}" for c in item.children]) if item.children else "- (none)"
+    prompt = cfg.headless_prompt_template.format(
+        title=item.title,
+        children_bullets=children_bullets,
+        done_token=cfg.task_done_message,
+    )
+
+    # Always run Claude (dry-run option removed)
+    try:
+        rc = run_claude_code(
+            cfg.claude_args,
+            cfg.show_claude_output,
+            cwd=cwd or Path.cwd(),
+            prompt=prompt,
+            output_format=cfg.headless_output_format,
+            row_updater=row_updater,
+            row_index=row_index,
+        )
+    except FileNotFoundError:
+        echo(tr("claude_not_found", cfg.lang), err=True)
+        raise typer.Exit(code=1) from None
+    if rc != 0:
+        echo(tr("claude_failed", cfg.lang, code=rc), err=True)
+        raise typer.Exit(code=1)
+
+    commit_msg = f"{cfg.git_commit_message_prefix}{item.title}"
+    # Exclude TODO list file from the main code commit
+    _commit_and_push_filtered(
+        commit_msg,
+        branch,
+        cwd=cwd,
+        exclude_paths=[cfg.input_path],
+    )
+    pr_title = f"{cfg.github_pr_title_prefix}{item.title}"
+    pr_body = cfg.github_pr_body_template.format(todo_item=item.title)
+    pr_url = create_pr(pr_title, pr_body, cwd=cwd)
+    if pr_url:
+        echo(color_success(tr("pr_created", cfg.lang, url=pr_url)))
+        if cfg.pr_urls is not None:
+            cfg.pr_urls.append(pr_url)
+    else:
+        # still collect placeholder for reporting
+        if cfg.pr_urls is not None:
+            cfg.pr_urls.append("")
+
+    # Update TODO.md with PR link; do not commit it (it's git-ignored)
+    todo_path = (cwd or Path.cwd()) / cfg.input_path
+    if update_todo_with_pr(todo_path, item, pr_url):
+        # No commit for TODO.md because it's ignored
+        pass
+
+
+def process_in_worktree(
+    root: Path,
+    item: TodoItem,
+    cfg: Config,
+    *,
+    row_updater: Callable[[int, str, str, bool], None] | None = None,
+    row_index: int | None = None,
+) -> None:
+    worktrees_dir = root / ".worktrees"
+    worktrees_dir.mkdir(exist_ok=True)
+
+    # Use a single slug for both branch and worktree path to avoid mismatch
+    slug = slugify(item.title)
+    branch = f"{cfg.git_branch_prefix}{slug}"
+    wt_path = worktrees_dir / slug
+
+    # Remove any existing directory silently if it is a registered worktree; suppress noisy errors
+    try:
+        subprocess.run(
+            ["git", "worktree", "remove", "-f", str(wt_path)],
+            cwd=root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        pass
+
+    git("fetch", cwd=root)
+    # Create the worktree bound to branch based on base branch tip
+    git("worktree", "add", "-B", branch, str(wt_path), cfg.git_base_branch, cwd=root)
+
+    # Do NOT switch to base/main inside the worktree; it's already on the new branch
+    process_one_todo(
+        item,
+        cfg,
+        cwd=wt_path,
+        skip_branch_ensure=True,
+        branch_name=branch,
+        row_updater=row_updater,
+        row_index=row_index,
+    )
+
+
+def _print_final_report(cfg: Config) -> None:
+    # Summary header
+    echo("")
+    echo(color_header("=== Summary Report ==="))
+
+    if not cfg.pr_urls:
+        echo(color_warn("No pull requests were created."))
+        return
+
+    # Print list of PR URLs
+    echo(color_info("Pull Requests:"))
+    for i, url in enumerate(cfg.pr_urls, start=1):
+        label = url if url else "(no PR created)"
+        echo(f"  {i}. {label}")
+
+    echo(color_success("Done."))
+
+
+@APP.command("run")
+def run(
+    cooldown: int = typer.Option(0, "--cooldown", "-c"),
+    git_branch_prefix: str = typer.Option("todo/", "--git-branch-prefix", "-b"),
+    git_commit_message_prefix: str = typer.Option("feat: ", "--git-commit-message-prefix", "-m"),
+    git_base_branch: str = typer.Option("main", "--git-base-branch", "-g"),
+    github_pr_title_prefix: str = typer.Option("feat: ", "--github-pr-title-prefix", "-t"),
+    github_pr_body_template: str = typer.Option(
+        "Implementing TODO item: {todo_item}", "--github-pr-body-template", "-p"
+    ),
+    config_path: str = typer.Option(".claude-manager.toml", "--config", "-f"),
+    input_path: str = typer.Option("TODO.md", "--input", "-i"),
+    claude_args: str = typer.Option("--dangerously-skip-permissions", "--claude-args"),
+    hooks_config: str = typer.Option(".claude/settings.local.json", "--hooks-config"),
+    max_keep_asking: int = typer.Option(3, "--max-keep-asking"),
+    task_done_message: str = typer.Option("CLAUDE_MANAGER_DONE", "--task-done-message"),
+    show_claude_output: bool = typer.Option(False, "--show-claude-output"),
+    doctor: bool = typer.Option(False, "--doctor", "-D"),
+    worktree_parallel: bool = typer.Option(False, "--worktree-parallel", "-w"),
+    worktree_parallel_max_semaphore: int = typer.Option(1, "--worktree-parallel-max-semaphore"),
+    lang: str = typer.Option("en", "--lang", "-L"),
+    i18n_path: str = typer.Option(
+        ".claude-manager.i18n.toml", "--i18n-path", help="Path to i18n TOML file"
+    ),
+    # Headless options
+    headless_prompt_template: str = typer.Option(
+        None,
+        "--headless-prompt-template",
+        help="Template for the headless prompt (use {title}, {children_bullets}, {done_token})",
+    ),
+    headless_output_format: str = typer.Option(
+        "stream-json", "--headless-output-format", help="Claude output format"
+    ),
+    # Color option
+    no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
+    # Debug
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logs to stderr"),
+):
+    cfg = Config(
+        cooldown=cooldown,
+        git_branch_prefix=git_branch_prefix,
+        git_commit_message_prefix=git_commit_message_prefix,
+        git_base_branch=git_base_branch,
+        github_pr_title_prefix=github_pr_title_prefix,
+        github_pr_body_template=github_pr_body_template,
+        config_path=config_path,
+        input_path=input_path,
+        claude_args=claude_args,
+        hooks_config=hooks_config,
+        max_keep_asking=max_keep_asking,
+        task_done_message=task_done_message,
+        show_claude_output=show_claude_output,
+        doctor=doctor,
+        worktree_parallel=worktree_parallel,
+        worktree_parallel_max_semaphore=worktree_parallel_max_semaphore,
+        lang=lang,
+        i18n_path=i18n_path,
+        headless_output_format=headless_output_format,
+        pr_urls=[],
+        color=not no_color,
+    )
+    if headless_prompt_template:
+        cfg.headless_prompt_template = headless_prompt_template
+
+    # Load config file overrides
+    conf = load_config_toml(Path(config_path))
+    if conf:
+        # Shallow merge for known keys under [claude_manager]
+        cm = conf.get("claude_manager") or {}
+        for k, v in cm.items():
+            if hasattr(cfg, k):
+                setattr(cfg, k, v)
+
+    root = Path.cwd()
+
+    # Load i18n from TOML
+    set_i18n(root / cfg.i18n_path)
+
+    # set global color/debug flags considering TTY as well
+    global COLOR_ENABLED, DEBUG_ENABLED
+    COLOR_ENABLED = bool(cfg.color) and sys.stdout.isatty()
+    DEBUG_ENABLED = bool(debug)
+
+    if doctor:
+        echo(tr("doctor_validating", cfg.lang))
+        hooks_abspath = root / cfg.hooks_config
+        todo_abspath = root / cfg.input_path
+        echo(tr("base_branch", cfg.lang, branch=cfg.git_base_branch))
+
+        ok = True
+        if hooks_abspath.exists():
+            echo(tr("hooks_file_exists", cfg.lang, path=str(hooks_abspath)))
+        else:
+            echo(tr("hooks_file_missing", cfg.lang, path=str(hooks_abspath)), err=True)
+            ok = False
+
+        if todo_abspath.exists():
+            echo(tr("todo_file_exists", cfg.lang, path=str(todo_abspath)))
+        else:
+            echo(tr("todo_file_missing", cfg.lang, path=str(todo_abspath)), err=True)
+            ok = False
+
+        # Check claude CLI
+        claude_ok = True
+        if shutil.which("claude"):
+            echo(tr("claude_cli_ok", cfg.lang))
+        else:
+            echo(tr("claude_cli_missing", cfg.lang), err=True)
+            claude_ok = False
+
+        # Check git repo and ignore status
+        git_ok = True
+        try:
+            git("rev-parse", "--is-inside-work-tree")
+            echo(tr("git_repo_ok", cfg.lang))
+        except Exception as e:
+            echo(tr("git_repo_failed", cfg.lang, error=e), err=True)
+            git_ok = False
+
+        ignore_ok = True
+        try:
+            if is_git_ignored(todo_abspath, cwd=root):
+                echo(tr("todo_ignored_ok", cfg.lang))
+            else:
+                echo(tr("todo_not_ignored", cfg.lang, path=str(todo_abspath)), err=True)
+                ignore_ok = False
+        except Exception as e:
+            echo(tr("gitignore_check_failed", cfg.lang, error=e), err=True)
+            ignore_ok = False
+
+        # Advisory warning about .worktrees ignore setting (does not affect success)
+        _warn_if_worktrees_not_ignored(root, lang=cfg.lang)
+
+        if ok and git_ok and ignore_ok and claude_ok:
+            echo(tr("doctor_ok", cfg.lang))
+            raise typer.Exit(code=0)
+        else:
+            echo(tr("doctor_failed", cfg.lang), err=True)
+            raise typer.Exit(code=1)
+
+    # Ensure TODO file is ignored before proceeding
+    todo_abspath = root / cfg.input_path
+    if not is_git_ignored(todo_abspath, cwd=root):
+        echo(tr("todo_must_be_ignored", cfg.lang, path=str(todo_abspath)), err=True)
+        raise typer.Exit(code=1)
+
+    md = (
+        (root / cfg.input_path).read_text(encoding="utf-8")
+        if (root / cfg.input_path).exists()
+        else ""
+    )
+    items = parse_todo_markdown(md)
+    if not items:
+        echo(tr("no_todo", cfg.lang))
+        raise typer.Exit(code=0)
+
+    if cfg.worktree_parallel:
+        max_workers = max(1, int(cfg.worktree_parallel_max_semaphore))
+        echo(tr("running_parallel", cfg.lang, workers=max_workers))
+        _warn_if_worktrees_not_ignored(root, lang=cfg.lang)
+        live = LiveRows(len(items), lines_per_row=1) if sys.stderr.isatty() else None
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [
+                ex.submit(
+                    process_in_worktree,
+                    root,
+                    item,
+                    cfg,
+                    row_updater=(live.update if live else None),
+                    row_index=i,
+                )
+                for i, item in enumerate(items)
+            ]
+            for fut in as_completed(futures):
+                exc = fut.exception()
+                if exc:
+                    raise exc
+        if live:
+            live.finish()
+        try:
+            git("checkout", cfg.git_base_branch, cwd=root)
+        except Exception:
+            pass
+        _print_final_report(cfg)
+        return
+
+    for idx, item in enumerate(items):
+        echo(color_info(tr("processing", cfg.lang, title=item.title)))
+        process_one_todo(item, cfg, cwd=root)
+        if idx < len(items) - 1 and cfg.cooldown > 0:
+            time.sleep(cfg.cooldown)
+
+    # After sequential run, return to base branch (best-effort)
+    try:
+        git("checkout", cfg.git_base_branch, cwd=root)
+    except Exception:
+        pass
+
+    # After sequential run, print final report
+    _print_final_report(cfg)
+
+
+def main():  # entry point
+    APP()
