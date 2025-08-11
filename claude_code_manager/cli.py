@@ -312,32 +312,31 @@ def ensure_hooks_config(path: Path, max_keep_asking: int, done_message: str) -> 
     if isinstance(stop_arr, dict):
         stop_arr = [stop_arr]
 
-    def has_our_command(entry: dict) -> bool:
-        for h in entry.get("hooks", []) or []:
-            if (
-                isinstance(h, dict)
-                and h.get("type") == "command"
-                and h.get("command") == STOP_HOOK_COMMAND
-            ):
-                return True
-        return False
-
-    # Remove any duplicate inner hook objects with our command
-    new_stop_arr: list[dict] = []
-    for entry in stop_arr:
-        existing_hooks = entry.get("hooks") or []
-        if existing_hooks and isinstance(existing_hooks, list):
-            filtered = [
-                h
-                for h in existing_hooks
-                if not (
-                    isinstance(h, dict)
-                    and h.get("type") == "command"
-                    and h.get("command") == STOP_HOOK_COMMAND
-                )
-            ]
-            entry = {**entry, "hooks": filtered}
-        new_stop_arr.append(entry)
+    # Clean up existing Stop entries:
+    # - remove our command from any existing entry
+    # - drop entries that end up empty or have no valid hooks list
+    # - deduplicate hooks within an entry
+    cleaned_stop_arr: list[dict] = []
+    for entry in stop_arr if isinstance(stop_arr, list) else []:
+        hooks_list = entry.get("hooks") or []
+        if not isinstance(hooks_list, list):
+            hooks_list = []
+        filtered_hooks: list[dict] = []
+        seen: set[tuple] = set()
+        for h in hooks_list:
+            if not isinstance(h, dict):
+                continue
+            if h.get("type") == "command" and h.get("command") == STOP_HOOK_COMMAND:
+                # remove our command from legacy entries; we'll add a single canonical entry later
+                continue
+            key = (h.get("type"), h.get("command"))
+            if key in seen:
+                continue
+            seen.add(key)
+            filtered_hooks.append(h)
+        if filtered_hooks:
+            cleaned_stop_arr.append({**entry, "hooks": filtered_hooks})
+        # if no hooks remain, drop the entry (avoids accumulating empty objects)
 
     stop_entry = {
         # No matcher for Stop per reference
@@ -350,9 +349,9 @@ def ensure_hooks_config(path: Path, max_keep_asking: int, done_message: str) -> 
         ]
     }
 
-    # Append our entry at the end
-    new_stop_arr.append(stop_entry)
-    hooks["Stop"] = new_stop_arr
+    # Append our canonical stop entry exactly once at the end
+    cleaned_stop_arr.append(stop_entry)
+    hooks["Stop"] = cleaned_stop_arr
 
     data["hooks"] = hooks
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
