@@ -174,9 +174,11 @@ class LiveRows:
             pass
 
 
-@APP.callback()
+@APP.callback(invoke_without_command=True)
 def _version_callback(
-    version: bool = typer.Option(False, "--version", "-v", help="Show version and exit"),
+    version: bool = typer.Option(
+        False, "--version", "-v", help="Show version and exit", is_eager=True
+    ),
 ):
     if version:
         echo(__version__)
@@ -913,6 +915,9 @@ def create_pr(title: str, body: str, base: str, head: str, cwd: Path | None = No
     except Exception as e3:
         debug_log(f"gh pr view fallback failed: {e3}")
         return None
+
+    # No URL could be determined
+    return None
 
 
 def slugify(text: str) -> str:
