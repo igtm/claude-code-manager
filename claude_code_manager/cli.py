@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-import pty
 import random
 import re
-import select
 import shutil
 import stat
 import string
@@ -100,9 +98,14 @@ class Config:
     worktree_parallel_max_semaphore: int = 1
     lang: str = "en"
     i18n_path: str = ".claude-manager.i18n.toml"
-    # New: interactive input for claude TUI
-    claude_send: str = ""
-    claude_send_delay: float = 0.2
+    # Headless mode (always used)
+    headless_prompt_template: str = (
+        "Implement the following TODO item in this repository.\n\n"
+        "Title: {title}\n"
+        "Subtasks:\n{children_bullets}\n\n"
+        "Please apply necessary changes. When finished, output the token: {done_token}\n"
+    )
+    headless_output_format: str = "stream-json"
 
 
 TODO_TOP_PATTERN = re.compile(r"^- \[ \] (?P<title>.+)$")
@@ -307,101 +310,64 @@ def ensure_hooks_config(path: Path, max_keep_asking: int, done_message: str) -> 
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
+def _args_list(args: str) -> list[str]:
+    return [x for x in args.split() if x]
+
+
+def _args_has_flag(args_list: list[str], flag: str) -> bool:
+    return any(a == flag or a.startswith(flag + "=") for a in args_list)
+
+
 def run_claude_code(
     args: str,
     show_output: bool,
     env: dict | None = None,
     cwd: Path | None = None,
     *,
-    send: str = "",
-    send_delay: float = 0.0,
+    prompt: str,
+    output_format: str = "stream-json",
 ) -> int:
-    cmd = ["claude"] + ([x for x in args.split() if x] if args else [])
+    # Always run in headless mode using -p
+    extra = _args_list(args)
+    cmd: list[str] = ["claude", "-p", prompt]
+    if not _args_has_flag(extra, "--output-format"):
+        cmd += ["--output-format", output_format]
+    cmd += extra
 
-    # If no interactive needs, run simply (inherits stdin for true non-interactive)
-    if not show_output and not send:
-        stdout = subprocess.DEVNULL
-        res = subprocess.run(
+    if show_output:
+        # Stream output to terminal
+        p_head = subprocess.Popen(
             cmd,
-            stdout=stdout,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            text=True,
             env={**os.environ, **(env or {})},
             cwd=str(cwd) if cwd else None,
         )
-        return res.returncode
-
-    # Interactive/TUI mode: use a PTY so claude gets a real TTY
-    master_fd, slave_fd = pty.openpty()
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            env={**os.environ, **(env or {})},
-            cwd=str(cwd) if cwd else None,
-            text=False,
-        )
-    except Exception:
-        # Fallback to simple run if PTY fails
+        assert p_head.stdout is not None
         try:
-            p = subprocess.run(
-                cmd,
-                env={**os.environ, **(env or {})},
-                cwd=str(cwd) if cwd else None,
-            )
-            return p.returncode
-        except Exception:
-            raise
-    finally:
-        # The child owns the slave end now
-        try:
-            os.close(slave_fd)
-        except Exception:
-            pass
-
-    sent = False
-    bufsize = 1024
-    rc: int | None = None
-    start_time = time.time()
-    try:
-        while True:
-            # Forward output to our stdout if requested
-            rlist, _, _ = select.select([master_fd], [], [], 0.05)
-            if master_fd in rlist:
+            for line in p_head.stdout:
                 try:
-                    data = os.read(master_fd, bufsize)
-                except OSError:
-                    data = b""
-                if not data:
-                    # EOF from child PTY
-                    if proc.poll() is not None:
-                        rc = proc.returncode
-                        break
-                else:
-                    if show_output:
-                        try:
-                            os.write(sys.stdout.fileno(), data)
-                        except Exception:
-                            # Best effort
-                            pass
-            # Send keys once after the specified delay
-            if send and not sent and (time.time() - start_time) >= float(send_delay):
-                try:
-                    os.write(master_fd, send.encode())
-                    sent = True
+                    sys.stdout.write(line)
                 except Exception:
-                    # Ignore send errors
-                    sent = True
-            if proc.poll() is not None:
-                rc = proc.returncode
-                break
-        return rc if rc is not None else 0
-    finally:
-        try:
-            os.close(master_fd)
-        except Exception:
-            pass
+                    pass
+            p_head.wait()
+            return int(p_head.returncode or 0)
+        finally:
+            try:
+                p_head.stdout.close()
+            except Exception:
+                pass
+    else:
+        r_head = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env={**os.environ, **(env or {})},
+            cwd=str(cwd) if cwd else None,
+        )
+        return r_head.returncode
 
 
 def git(*args: str, cwd: Path | None = None) -> str:
@@ -563,14 +529,22 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> No
     hooks_path = (cwd or Path.cwd()) / cfg.hooks_config
     ensure_hooks_config(hooks_path, cfg.max_keep_asking, cfg.task_done_message)
 
+    # Build headless prompt from item
+    children_bullets = "\n".join([f"- {c}" for c in item.children]) if item.children else "- (none)"
+    prompt = cfg.headless_prompt_template.format(
+        title=item.title,
+        children_bullets=children_bullets,
+        done_token=cfg.task_done_message,
+    )
+
     if not cfg.dry_run:
         try:
             rc = run_claude_code(
                 cfg.claude_args,
                 cfg.show_claude_output,
                 cwd=cwd or Path.cwd(),
-                send=cfg.claude_send,
-                send_delay=cfg.claude_send_delay,
+                prompt=prompt,
+                output_format=cfg.headless_output_format,
             )
         except FileNotFoundError:
             echo(tr("claude_not_found", cfg.lang), err=True)
@@ -673,10 +647,14 @@ def run(
     i18n_path: str = typer.Option(
         ".claude-manager.i18n.toml", "--i18n-path", help="Path to i18n TOML file"
     ),
-    # New: options to send keys to the interactive claude TUI
-    claude_send: str = typer.Option("", "--claude-send", help="Keys to send to claude TUI"),
-    claude_send_delay: float = typer.Option(
-        0.2, "--claude-send-delay", help="Seconds to wait before sending keys"
+    # Headless options
+    headless_prompt_template: str = typer.Option(
+        None,
+        "--headless-prompt-template",
+        help="Template for the headless prompt (use {title}, {children_bullets}, {done_token})",
+    ),
+    headless_output_format: str = typer.Option(
+        "stream-json", "--headless-output-format", help="Claude output format"
     ),
 ):
     cfg = Config(
@@ -699,9 +677,10 @@ def run(
         worktree_parallel_max_semaphore=worktree_parallel_max_semaphore,
         lang=lang,
         i18n_path=i18n_path,
-        claude_send=claude_send,
-        claude_send_delay=claude_send_delay,
+        headless_output_format=headless_output_format,
     )
+    if headless_prompt_template:
+        cfg.headless_prompt_template = headless_prompt_template
 
     # Load config file overrides
     conf = load_config_toml(Path(config_path))
