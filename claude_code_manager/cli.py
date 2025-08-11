@@ -460,9 +460,21 @@ def run_claude_code(
                 )
                 parts.append(f"usage: {usage_part}")
             msg = f"{ch} running claude...: " + " | ".join(parts)
-            pad = max(0, last_len - len(msg))
             try:
-                sys.stderr.write("\r" + msg + (" " * pad))
+                if sys.stderr.isatty():
+                    # On a TTY: clear the entire line
+                    # Truncate to terminal width to avoid wrapping
+                    try:
+                        width = shutil.get_terminal_size(fallback=(120, 20)).columns
+                    except Exception:
+                        width = 0
+                    if width and len(msg) >= width:
+                        msg = msg[: max(1, width - 1)]
+                    sys.stderr.write("\r\x1b[2K" + msg)
+                else:
+                    # Non-TTY: best-effort overwrite using CR and padding
+                    pad = max(0, last_len - len(msg))
+                    sys.stderr.write("\r" + msg + (" " * pad))
                 sys.stderr.flush()
             except Exception:
                 pass
