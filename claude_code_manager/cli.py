@@ -383,18 +383,14 @@ def run_claude_code(
     if not provided_fmt:
         cmd += ["--output-format", output_format]
 
-    # Always add --verbose for stream-json to ensure proper JSONL output
+    # Ensure Claude emits structured info for stream-json
     if effective_fmt == "stream-json" and not _args_has_flag(extra, "--verbose"):
         cmd += ["--verbose"]
-
-    # Ensure JSONL is actually printed by Claude when we're going to parse it
-    if effective_fmt == "stream-json" and not show_output and not _args_has_flag(extra, "--print"):
-        cmd += ["--print"]
 
     cmd += extra
 
     if show_output:
-        # Stream output to terminal
+        # Stream output to terminal while also allowing JSON parsing by callers if needed
         p_head = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -418,9 +414,7 @@ def run_claude_code(
             except Exception:
                 pass
     else:
-        # Show a simple spinner and count response types by parsing JSONL
-        spinner_chars = "|/-\\"
-        idx = 0
+        # Parse JSONL quietly and discard raw logs, then print a simple summary
         counts: dict[str, int] = {"system": 0, "assistant": 0, "user": 0}
         allowed = set(counts.keys())
         p_head = subprocess.Popen(
@@ -430,40 +424,24 @@ def run_claude_code(
             text=True,
             env={**os.environ, **(env or {})},
             cwd=str(cwd) if cwd else None,
-            bufsize=1,
         )
         assert p_head.stdout is not None
         try:
-            while True:
-                line = p_head.stdout.readline()
-                if not line:
-                    if p_head.poll() is not None:
-                        break
-                    # still running; tick spinner (write to stderr so it always shows)
-                    idx = (idx + 1) % len(spinner_chars)
-                    sys.stderr.write(f"\r{_ansi('36', 'loading')} {spinner_chars[idx]}")
-                    sys.stderr.flush()
-                    time.sleep(0.1)
-                    continue
-                # Got a line: try to parse JSON
+            for line in p_head.stdout:
+                # Do not echo; only parse
                 try:
                     obj = json.loads(line)
-                    typ = str(obj.get("type", "")).strip() or "(unknown)"
+                    typ = str(obj.get("type", "")).strip()
                     if typ in allowed:
                         counts[typ] = counts.get(typ, 0) + 1
                 except Exception:
                     # ignore non-JSON lines
                     pass
+            p_head.wait()
             rc = int(p_head.returncode or 0)
         finally:
             try:
                 p_head.stdout.close()
-            except Exception:
-                pass
-            # clear spinner line if possible, otherwise just break line
-            try:
-                sys.stderr.write("\r\x1b[2K\n")
-                sys.stderr.flush()
             except Exception:
                 pass
         # Print summary of response types (only system/assistant/user)
