@@ -629,13 +629,11 @@ def run_claude_code(
                 p_head.stdout.close()
             except Exception:
                 pass
-        # finalize status line with a check/cross and newline
+        # finalize status line with a check/cross without moving to a new line
         try:
             marker = "✓" if (not aborted and not errored and rc == 0) else "❌"
             _print_status(prefix_char=marker, final=True)
-            if row_updater is None or row_index is None:
-                sys.stderr.write("\n")
-                sys.stderr.flush()
+            # Keep same line (no newline) to behave like spinner
         except Exception:
             pass
         return rc
