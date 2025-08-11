@@ -1,8 +1,5 @@
 # claude-code-manager
 
-[![English](https://img.shields.io/badge/README-English-blue.svg)](README.en.md)
-[![日本語](https://img.shields.io/badge/README-日本語-orange.svg)](README.ja.md)
-
 A CLI to orchestrate claude-code runs from a Markdown TODO list.
 
 ## Quick start
