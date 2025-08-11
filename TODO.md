@@ -1,2 +1,0 @@
-- [ ] README.md をよりリッチにする。上位の有名なライブラリのREADME.mdポイ感じにする。
-- [ ] README.md を i18n 化する
