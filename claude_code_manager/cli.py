@@ -138,7 +138,6 @@ class Config:
     max_keep_asking: int = 3
     task_done_message: str = "CLAUDE_MANAGER_DONE"
     show_claude_output: bool = False
-    dry_run: bool = False
     doctor: bool = False
     worktree_parallel: bool = False
     worktree_parallel_max_semaphore: int = 1
@@ -760,21 +759,21 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> No
         done_token=cfg.task_done_message,
     )
 
-    if not cfg.dry_run:
-        try:
-            rc = run_claude_code(
-                cfg.claude_args,
-                cfg.show_claude_output,
-                cwd=cwd or Path.cwd(),
-                prompt=prompt,
-                output_format=cfg.headless_output_format,
-            )
-        except FileNotFoundError:
-            echo(tr("claude_not_found", cfg.lang), err=True)
-            raise typer.Exit(code=1) from None
-        if rc != 0:
-            echo(tr("claude_failed", cfg.lang, code=rc), err=True)
-            raise typer.Exit(code=1)
+    # Always run Claude (dry-run option removed)
+    try:
+        rc = run_claude_code(
+            cfg.claude_args,
+            cfg.show_claude_output,
+            cwd=cwd or Path.cwd(),
+            prompt=prompt,
+            output_format=cfg.headless_output_format,
+        )
+    except FileNotFoundError:
+        echo(tr("claude_not_found", cfg.lang), err=True)
+        raise typer.Exit(code=1) from None
+    if rc != 0:
+        echo(tr("claude_failed", cfg.lang, code=rc), err=True)
+        raise typer.Exit(code=1)
 
     commit_msg = f"{cfg.git_commit_message_prefix}{item.title}"
     # Exclude TODO list file from the main code commit
@@ -886,7 +885,6 @@ def run(
     max_keep_asking: int = typer.Option(3, "--max-keep-asking"),
     task_done_message: str = typer.Option("CLAUDE_MANAGER_DONE", "--task-done-message"),
     show_claude_output: bool = typer.Option(False, "--show-claude-output"),
-    dry_run: bool = typer.Option(False, "--dry-run", "-d"),
     doctor: bool = typer.Option(False, "--doctor", "-D"),
     worktree_parallel: bool = typer.Option(False, "--worktree-parallel", "-w"),
     worktree_parallel_max_semaphore: int = typer.Option(1, "--worktree-parallel-max-semaphore"),
@@ -922,7 +920,6 @@ def run(
         max_keep_asking=max_keep_asking,
         task_done_message=task_done_message,
         show_claude_output=show_claude_output,
-        dry_run=dry_run,
         doctor=doctor,
         worktree_parallel=worktree_parallel,
         worktree_parallel_max_semaphore=worktree_parallel_max_semaphore,
