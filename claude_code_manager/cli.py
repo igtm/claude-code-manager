@@ -351,21 +351,17 @@ def _commit_and_push_filtered(
     message: str,
     branch: str,
     cwd: Path | None = None,
-    include_paths: list[str] | None = None,
+    include_paths: list[str] | None = None,  # kept for compatibility; ignored
     exclude_paths: list[str] | None = None,
 ) -> None:
-    # Stage files according to filters
-    if include_paths:
-        git_call(["add", "--", *include_paths], cwd=cwd)
-    else:
-        git_call(["add", "-A"], cwd=cwd)
-        if exclude_paths:
-            for p in exclude_paths:
-                # Unstage excluded paths if they were staged
-                try:
-                    git_call(["reset", "HEAD", "--", p], cwd=cwd)
-                except Exception:
-                    pass
+    # Stage everything, then unstage excluded paths if any
+    git_call(["add", "-A"], cwd=cwd)
+    if exclude_paths:
+        for p in exclude_paths:
+            try:
+                git_call(["reset", "HEAD", "--", p], cwd=cwd)
+            except Exception:
+                pass
 
     # If nothing staged, skip commit/push
     try:
@@ -453,16 +449,11 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> No
     if pr_url:
         echo(f"PR created: {pr_url}")
 
-    # Update TODO.md with PR link and commit so working tree stays clean
+    # Update TODO.md with PR link; do not commit it (it's git-ignored)
     todo_path = (cwd or Path.cwd()) / cfg.input_path
     if update_todo_with_pr(todo_path, item, pr_url):
-        # Commit only the TODO list file
-        _commit_and_push_filtered(
-            f"{cfg.git_commit_message_prefix}{item.title} [todo]",
-            branch,
-            cwd=cwd,
-            include_paths=[cfg.input_path],
-        )
+        # No commit for TODO.md because it's ignored
+        pass
 
 
 def slugify(text: str) -> str:
