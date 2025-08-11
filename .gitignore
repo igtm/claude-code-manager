@@ -210,3 +210,4 @@ __marimo__/
 .claude/hooks/stop-keep-asking.py
 .claude/settings.local.json
 TODO.md
+.worktrees/

@@ -786,8 +786,9 @@ def process_one_todo(
     cwd: Path | None = None,
     *,
     skip_branch_ensure: bool = False,
+    branch_name: str | None = None,
 ) -> None:
-    branch = f"{cfg.git_branch_prefix}{slugify(item.title)}"
+    branch = branch_name or f"{cfg.git_branch_prefix}{slugify(item.title)}"
     if not skip_branch_ensure:
         ensure_branch(
             cfg.git_base_branch,
@@ -878,7 +879,7 @@ def process_in_worktree(root: Path, item: TodoItem, cfg: Config) -> None:
     git("worktree", "add", "-B", branch, str(wt_path), cfg.git_base_branch, cwd=root)
 
     # Do NOT switch to base/main inside the worktree; it's already on the new branch
-    process_one_todo(item, cfg, cwd=wt_path, skip_branch_ensure=True)
+    process_one_todo(item, cfg, cwd=wt_path, skip_branch_ensure=True, branch_name=branch)
 
 
 def _print_final_report(cfg: Config) -> None:
