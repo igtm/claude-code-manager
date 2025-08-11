@@ -667,15 +667,20 @@ def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: str | None) -> 
 
 
 def git(*args: str, cwd: Path | None = None) -> str:
-    return subprocess.check_output(["git", *args], text=True, cwd=str(cwd) if cwd else None).strip()
+    kwargs: dict = {"text": True, "cwd": str(cwd) if cwd else None}
+    if not DEBUG_ENABLED:
+        # Suppress stderr (progress/hints) when not debugging
+        kwargs["stderr"] = subprocess.DEVNULL
+    return subprocess.check_output(["git", *args], **kwargs).strip()
 
 
 def git_call(args: list[str], cwd: Path | None = None) -> None:
-    # Suppress stdout from git when not debugging; keep stderr visible for errors
-    kwargs: dict = {}
+    # Suppress stdout/stderr from git when not debugging
+    kwargs: dict = {"cwd": str(cwd) if cwd else None}
     if not DEBUG_ENABLED:
         kwargs["stdout"] = subprocess.DEVNULL
-    subprocess.check_call(["git", *args], cwd=str(cwd) if cwd else None, **kwargs)
+        kwargs["stderr"] = subprocess.DEVNULL
+    subprocess.check_call(["git", *args], **kwargs)
 
 
 def is_git_ignored(path: Path, cwd: Path | None = None) -> bool:
