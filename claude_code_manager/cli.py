@@ -361,10 +361,41 @@ def ensure_branch(
                 pass
 
 
-def commit_and_push(message: str, branch: str, cwd: Path | None = None):
-    git_call(["add", "-A"], cwd=cwd)
+def _commit_and_push_filtered(
+    message: str,
+    branch: str,
+    cwd: Path | None = None,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+) -> None:
+    # Stage files according to filters
+    if include_paths:
+        git_call(["add", "--", *include_paths], cwd=cwd)
+    else:
+        git_call(["add", "-A"], cwd=cwd)
+        if exclude_paths:
+            for p in exclude_paths:
+                # Unstage excluded paths if they were staged
+                try:
+                    git_call(["reset", "HEAD", "--", p], cwd=cwd)
+                except Exception:
+                    pass
+
+    # If nothing staged, skip commit/push
+    try:
+        staged = git("diff", "--cached", "--name-only", cwd=cwd)
+    except Exception:
+        staged = ""
+    if not staged.strip():
+        return
+
     git_call(["commit", "-m", message], cwd=cwd)
     git_call(["push", "-u", "origin", branch], cwd=cwd)
+
+
+def commit_and_push(message: str, branch: str, cwd: Path | None = None):
+    # Backward-compatible default: stage everything and push
+    _commit_and_push_filtered(message, branch, cwd=cwd)
 
 
 def create_pr(title: str, body: str, cwd: Path | None = None) -> str | None:
@@ -423,7 +454,13 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> No
             raise RuntimeError(f"claude exited with {rc}")
 
     commit_msg = f"{cfg.git_commit_message_prefix}{item.title}"
-    commit_and_push(commit_msg, branch, cwd=cwd)
+    # Exclude TODO list file from the main code commit
+    _commit_and_push_filtered(
+        commit_msg,
+        branch,
+        cwd=cwd,
+        exclude_paths=[cfg.input_path],
+    )
     pr_title = f"{cfg.github_pr_title_prefix}{item.title}"
     pr_body = cfg.github_pr_body_template.format(todo_item=item.title)
     pr_url = create_pr(pr_title, pr_body, cwd=cwd)
@@ -433,7 +470,13 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> No
     # Update TODO.md with PR link and commit so working tree stays clean
     todo_path = (cwd or Path.cwd()) / cfg.input_path
     if update_todo_with_pr(todo_path, item, pr_url):
-        commit_and_push(f"{cfg.git_commit_message_prefix}{item.title} [todo]", branch, cwd=cwd)
+        # Commit only the TODO list file
+        _commit_and_push_filtered(
+            f"{cfg.git_commit_message_prefix}{item.title} [todo]",
+            branch,
+            cwd=cwd,
+            include_paths=[cfg.input_path],
+        )
 
 
 def slugify(text: str) -> str:
