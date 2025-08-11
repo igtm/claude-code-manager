@@ -78,6 +78,7 @@ def echo(msg: str, err: bool = False):
 
 # --- simple color helpers ---
 COLOR_ENABLED = True  # will be set based on CLI option and TTY
+DEBUG_ENABLED = False  # set from CLI
 
 
 def _ansi(code: str, s: str) -> str:
@@ -98,6 +99,19 @@ def color_warn(s: str) -> str:
 
 def color_header(s: str) -> str:
     return _ansi("1;36", s)  # bold cyan
+
+
+def color_debug(s: str) -> str:
+    return _ansi("35", s)  # magenta
+
+
+def debug_log(msg: str) -> None:
+    if DEBUG_ENABLED:
+        try:
+            sys.stderr.write(color_debug(f"[debug] {msg}\n"))
+            sys.stderr.flush()
+        except Exception:
+            pass
 
 
 @APP.callback()
@@ -389,6 +403,10 @@ def run_claude_code(
 
     cmd += extra
 
+    debug_log(f"running: {' '.join(cmd)}")
+    debug_log(f"cwd={cwd or Path.cwd()}")
+    debug_log(f"show_output={show_output}, output_format={effective_fmt}")
+
     if show_output:
         # Stream output to terminal while also allowing JSON parsing by callers if needed
         p_head = subprocess.Popen(
@@ -428,13 +446,16 @@ def run_claude_code(
         assert p_head.stdout is not None
         try:
             for line in p_head.stdout:
+                debug_log(f"line: {line.rstrip()}")
                 # Do not echo; only parse
                 try:
                     obj = json.loads(line)
                     typ = str(obj.get("type", "")).strip()
+                    debug_log(f"parsed type={typ}")
                     if typ in allowed:
                         counts[typ] = counts.get(typ, 0) + 1
-                except Exception:
+                except Exception as e:
+                    debug_log(f"non-json or parse error: {e}")
                     # ignore non-JSON lines
                     pass
             p_head.wait()
@@ -764,6 +785,8 @@ def run(
     ),
     # Color option
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
+    # Debug
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logs to stderr"),
 ):
     cfg = Config(
         cooldown=cooldown,
@@ -806,9 +829,10 @@ def run(
     # Load i18n from TOML
     set_i18n(root / cfg.i18n_path)
 
-    # set global color flag considering TTY as well
-    global COLOR_ENABLED
+    # set global color/debug flags considering TTY as well
+    global COLOR_ENABLED, DEBUG_ENABLED
     COLOR_ENABLED = bool(cfg.color) and sys.stdout.isatty()
+    DEBUG_ENABLED = bool(debug)
 
     if doctor:
         echo(tr("doctor_validating", cfg.lang))
