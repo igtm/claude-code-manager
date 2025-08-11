@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/stop-keep-asking.py",
+            "comment": "// added by claude-code-manager"
+          }
+        ]
+      }
+    ]
+  }
+}
