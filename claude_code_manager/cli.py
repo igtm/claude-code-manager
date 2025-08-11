@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import stat
+import string
 import subprocess
 import sys
 import time
@@ -482,7 +484,10 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> No
 def slugify(text: str) -> str:
     text = text.lower()
     text = re.sub(r"[^a-z0-9-_]+", "-", text)
-    return re.sub(r"-+", "-", text).strip("-")
+    slug = re.sub(r"-+", "-", text).strip("-")
+    # Add 6 random alphanumeric chars for uniqueness
+    rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"{slug}-{rand}"
 
 
 def load_config_toml(path: Path) -> dict:
