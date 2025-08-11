@@ -1,8 +1,6 @@
 [i18n.en]
 doctor_validating      = "Doctor: validating configuration..."
 base_branch            = "base branch: {branch}"
-hooks_file_exists      = "✅ hooks file exists: {path}"
-hooks_file_missing     = "❌ hooks file missing: {path}"
 todo_file_exists       = "✅ TODO file exists: {path}"
 todo_file_missing      = "❌ TODO file missing: {path}"
 claude_cli_ok          = "✅ claude CLI: OK"
@@ -27,8 +25,6 @@ todo_must_be_ignored   = "TODO file must be ignored by git: {path}\nPlease add i
 [i18n.ja]
 doctor_validating      = "Doctor: 設定を検証しています..."
 base_branch            = "ベースブランチ: {branch}"
-hooks_file_exists      = "✅ hooks ファイルがあります: {path}"
-hooks_file_missing     = "❌ hooks ファイルが見つかりません: {path}"
 todo_file_exists       = "✅ TODO ファイルがあります: {path}"
 todo_file_missing      = "❌ TODO ファイルが見つかりません: {path}"
 claude_cli_ok          = "✅ claude コマンド: OK"
