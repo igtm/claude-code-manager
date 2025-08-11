@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import pty
 import random
 import re
+import select
 import shutil
 import stat
 import string
@@ -98,6 +100,9 @@ class Config:
     worktree_parallel_max_semaphore: int = 1
     lang: str = "en"
     i18n_path: str = ".claude-manager.i18n.toml"
+    # New: interactive input for claude TUI
+    claude_send: str = ""
+    claude_send_delay: float = 0.2
 
 
 TODO_TOP_PATTERN = re.compile(r"^- \[ \] (?P<title>.+)$")
@@ -142,7 +147,7 @@ STOP_HOOK_COMMAND = f"$CLAUDE_PROJECT_DIR/{STOP_HOOK_REL_SCRIPT}"
 
 def _write_stop_hook_script(script_path: Path, max_keep_asking: int, done_message: str) -> None:
     script_path.parent.mkdir(parents=True, exist_ok=True)
-    content = f"""#!/usr/bin/env python3
+    template = """#!/usr/bin/env python3
 import json, sys, os, io
 from pathlib import Path
 
@@ -152,8 +157,8 @@ STATE_FILE = (
     / "manager_state.json"
 )
 
-MAX_ASK = {int(max_keep_asking)}
-DONE_TOKEN = {json.dumps(done_message, ensure_ascii=False)}
+MAX_ASK = __MAX_ASK__
+DONE_TOKEN = __DONE_TOKEN__
 
 
 def load_state():
@@ -161,7 +166,7 @@ def load_state():
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {{}}
+        return {}
 
 
 def save_state(s):
@@ -199,29 +204,32 @@ def main():
 
     # If DONE token already present, allow stop
     if transcript_has_done(transcript_path, DONE_TOKEN):
-        print(json.dumps({{"continue": True, "suppressOutput": True}}, ensure_ascii=False))
+        print(json.dumps({"continue": True, "suppressOutput": True}, ensure_ascii=False))
         return
 
     # Count per-session asks
     state = load_state()
-    key = f"{{sid}}:asks"
+    key = f"{sid}:asks"
     cnt = int(state.get(key, 0))
     if cnt < MAX_ASK:
         state[key] = cnt + 1
         save_state(state)
-        print(json.dumps({{
+        print(json.dumps({
             "decision": "block",
-            "reason": f"続けて。実装が終了し終わっていたら、{{DONE_TOKEN}}と返して。",
+            "reason": f"続けて。実装が終了し終わっていたら、{DONE_TOKEN}と返して。",
             "suppressOutput": True
-        }}, ensure_ascii=False))
+        }, ensure_ascii=False))
         return
 
     # Max reached: allow stop
-    print(json.dumps({{"continue": True, "suppressOutput": True}}, ensure_ascii=False))
+    print(json.dumps({"continue": True, "suppressOutput": True}, ensure_ascii=False))
 
 if __name__ == "__main__":
     main()
 """
+    content = template.replace("__MAX_ASK__", str(int(max_keep_asking))).replace(
+        "__DONE_TOKEN__", json.dumps(done_message, ensure_ascii=False)
+    )
     script_path.write_text(content, encoding="utf-8")
     # Make executable
     st = os.stat(script_path)
@@ -300,18 +308,100 @@ def ensure_hooks_config(path: Path, max_keep_asking: int, done_message: str) -> 
 
 
 def run_claude_code(
-    args: str, show_output: bool, env: dict | None = None, cwd: Path | None = None
+    args: str,
+    show_output: bool,
+    env: dict | None = None,
+    cwd: Path | None = None,
+    *,
+    send: str = "",
+    send_delay: float = 0.0,
 ) -> int:
     cmd = ["claude"] + ([x for x in args.split() if x] if args else [])
-    stdout = None if show_output else subprocess.DEVNULL
-    proc = subprocess.run(
-        cmd,
-        stdout=stdout,
-        stderr=subprocess.STDOUT,
-        env={**os.environ, **(env or {})},
-        cwd=str(cwd) if cwd else None,
-    )
-    return proc.returncode
+
+    # If no interactive needs, run simply (inherits stdin for true non-interactive)
+    if not show_output and not send:
+        stdout = subprocess.DEVNULL
+        res = subprocess.run(
+            cmd,
+            stdout=stdout,
+            stderr=subprocess.STDOUT,
+            env={**os.environ, **(env or {})},
+            cwd=str(cwd) if cwd else None,
+        )
+        return res.returncode
+
+    # Interactive/TUI mode: use a PTY so claude gets a real TTY
+    master_fd, slave_fd = pty.openpty()
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env={**os.environ, **(env or {})},
+            cwd=str(cwd) if cwd else None,
+            text=False,
+        )
+    except Exception:
+        # Fallback to simple run if PTY fails
+        try:
+            p = subprocess.run(
+                cmd,
+                env={**os.environ, **(env or {})},
+                cwd=str(cwd) if cwd else None,
+            )
+            return p.returncode
+        except Exception:
+            raise
+    finally:
+        # The child owns the slave end now
+        try:
+            os.close(slave_fd)
+        except Exception:
+            pass
+
+    sent = False
+    bufsize = 1024
+    rc: int | None = None
+    start_time = time.time()
+    try:
+        while True:
+            # Forward output to our stdout if requested
+            rlist, _, _ = select.select([master_fd], [], [], 0.05)
+            if master_fd in rlist:
+                try:
+                    data = os.read(master_fd, bufsize)
+                except OSError:
+                    data = b""
+                if not data:
+                    # EOF from child PTY
+                    if proc.poll() is not None:
+                        rc = proc.returncode
+                        break
+                else:
+                    if show_output:
+                        try:
+                            os.write(sys.stdout.fileno(), data)
+                        except Exception:
+                            # Best effort
+                            pass
+            # Send keys once after the specified delay
+            if send and not sent and (time.time() - start_time) >= float(send_delay):
+                try:
+                    os.write(master_fd, send.encode())
+                    sent = True
+                except Exception:
+                    # Ignore send errors
+                    sent = True
+            if proc.poll() is not None:
+                rc = proc.returncode
+                break
+        return rc if rc is not None else 0
+    finally:
+        try:
+            os.close(master_fd)
+        except Exception:
+            pass
 
 
 def git(*args: str, cwd: Path | None = None) -> str:
@@ -475,7 +565,13 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> No
 
     if not cfg.dry_run:
         try:
-            rc = run_claude_code(cfg.claude_args, cfg.show_claude_output, cwd=cwd or Path.cwd())
+            rc = run_claude_code(
+                cfg.claude_args,
+                cfg.show_claude_output,
+                cwd=cwd or Path.cwd(),
+                send=cfg.claude_send,
+                send_delay=cfg.claude_send_delay,
+            )
         except FileNotFoundError:
             echo(tr("claude_not_found", cfg.lang), err=True)
             raise typer.Exit(code=1) from None
@@ -577,6 +673,11 @@ def run(
     i18n_path: str = typer.Option(
         ".claude-manager.i18n.toml", "--i18n-path", help="Path to i18n TOML file"
     ),
+    # New: options to send keys to the interactive claude TUI
+    claude_send: str = typer.Option("", "--claude-send", help="Keys to send to claude TUI"),
+    claude_send_delay: float = typer.Option(
+        0.2, "--claude-send-delay", help="Seconds to wait before sending keys"
+    ),
 ):
     cfg = Config(
         cooldown=cooldown,
@@ -598,6 +699,8 @@ def run(
         worktree_parallel_max_semaphore=worktree_parallel_max_semaphore,
         lang=lang,
         i18n_path=i18n_path,
+        claude_send=claude_send,
+        claude_send_delay=claude_send_delay,
     )
 
     # Load config file overrides
