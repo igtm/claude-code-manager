@@ -375,13 +375,13 @@ def run_claude_code(
                 return line_colored
 
             if row_updater is not None and row_index is not None and sys.stderr.isatty():
-                line_plain = f"{ch} worktree {row_index + 1} | {_counts_text()}"
+                line_plain = f"{ch} todo {row_index + 1} | {_counts_text()}"
                 line_out = _colorize_line_from_plain(line_plain) if COLOR_ENABLED else line_plain
                 row_updater(row_index, line_out, "", final)
                 return
 
             counts_part_plain = _counts_text()
-            line1_plain = f"{ch} running claude...: {counts_part_plain}"
+            line1_plain = f"{ch} todo {row_index + 1}: {counts_part_plain}" if row_index is not None else f"{ch} running claude...: {counts_part_plain}"
             try:
                 import shutil as _shutil
 
@@ -577,13 +577,13 @@ def run_claude_and_detect(
                 return line_colored
 
             if row_updater is not None and row_index is not None and sys.stderr.isatty():
-                line_plain = f"{ch} worktree {row_index + 1} | {_counts_text()}"
+                line_plain = f"{ch} todo {row_index + 1} | {_counts_text()}"
                 line_out = _colorize_line_from_plain(line_plain) if COLOR_ENABLED else line_plain
                 row_updater(row_index, line_out, "", final)
                 return
 
             counts_part_plain = _counts_text()
-            line1_plain = f"{ch} running claude...: {counts_part_plain}"
+            line1_plain = f"{ch} todo {row_index + 1}: {counts_part_plain}" if row_index is not None else f"{ch} running claude...: {counts_part_plain}"
             try:
                 import shutil as _shutil
 
