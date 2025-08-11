@@ -1,6 +1,6 @@
 # claude-code-manager
 
-[English](docs/README.en.md) | [日本語](docs/README.ja.md)
+[English](README.en.md) | [日本語](README.ja.md) | [Back to main](../README.md)
 
 A CLI to orchestrate claude-code runs from a Markdown TODO list.
 
