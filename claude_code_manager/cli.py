@@ -1030,6 +1030,9 @@ def run(
             echo(tr("gitignore_check_failed", cfg.lang, error=e), err=True)
             ignore_ok = False
 
+        # Advisory warning about .worktrees ignore setting (does not affect success)
+        _warn_if_worktrees_not_ignored(root, lang=cfg.lang)
+
         if ok and git_ok and ignore_ok and claude_ok:
             echo(tr("doctor_ok", cfg.lang))
             raise typer.Exit(code=0)
