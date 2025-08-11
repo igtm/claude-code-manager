@@ -466,6 +466,36 @@ def ensure_branch(
         git("rebase", base, cwd=cwd)
 
 
+def _cleanup_failed_branch(base: str, branch: str, cwd: Path | None = None) -> None:
+    """Force-switch back to base branch and delete the failed branch.
+    Best-effort: ignore errors.
+    """
+    # Discard any local changes in the failed branch to allow checkout
+    try:
+        git_call(["reset", "--hard"], cwd=cwd)
+    except Exception:
+        pass
+    try:
+        git_call(["clean", "-fd"], cwd=cwd)
+    except Exception:
+        pass
+
+    # Switch back to base branch
+    try:
+        git_call(["checkout", base], cwd=cwd)
+    except Exception:
+        try:
+            git_call(["checkout", "-f", base], cwd=cwd)
+        except Exception:
+            return  # cannot switch; abort cleanup
+
+    # Delete the failed branch (force)
+    try:
+        git_call(["branch", "-D", branch], cwd=cwd)
+    except Exception:
+        pass
+
+
 def _commit_and_push_filtered(
     message: str,
     branch: str,
@@ -572,6 +602,8 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> No
             raise typer.Exit(code=1) from None
         if rc != 0:
             echo(tr("claude_failed", cfg.lang, code=rc), err=True)
+            # Cleanup branch in case of Claude failure
+            _cleanup_failed_branch(cfg.git_base_branch, branch, cwd=cwd)
             raise typer.Exit(code=1)
 
     commit_msg = f"{cfg.git_commit_message_prefix}{item.title}"
