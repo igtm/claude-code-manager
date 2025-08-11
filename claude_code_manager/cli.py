@@ -785,12 +785,24 @@ def _commit_and_push_filtered(
             except Exception:
                 pass
 
-    # If nothing staged, skip commit/push
+    # If nothing staged, we may still need to ensure the branch has an upstream
+    def _ensure_upstream() -> None:
+        try:
+            # Check if upstream exists
+            git("rev-parse", "--abbrev-ref", "@{u}", cwd=cwd)
+        except Exception:
+            # No upstream; push branch even without new commits
+            try:
+                git_call(["push", "-u", "origin", branch], cwd=cwd)
+            except Exception:
+                pass
+
     try:
         staged = git("diff", "--cached", "--name-only", cwd=cwd)
     except Exception:
         staged = ""
     if not staged.strip():
+        _ensure_upstream()
         return
 
     git_call(["commit", "-m", message], cwd=cwd)
@@ -802,19 +814,48 @@ def commit_and_push(message: str, branch: str, cwd: Path | None = None):
     _commit_and_push_filtered(message, branch, cwd=cwd)
 
 
-def create_pr(title: str, body: str, cwd: Path | None = None) -> str | None:
-    # Try gh CLI if available
-    try:
-        kwargs: dict = {"text": True, "cwd": str(cwd) if cwd else None}
+def create_pr(title: str, body: str, base: str, cwd: Path | None = None) -> str | None:
+    # Create a PR using GitHub CLI and return the URL. Keep output quiet in non-debug.
+    def _kwargs():
+        k: dict = {"text": True, "cwd": str(cwd) if cwd else None}
         if not DEBUG_ENABLED:
-            # Suppress gh progress and other noise on stderr when not debugging
-            kwargs["stderr"] = subprocess.DEVNULL
+            k["stderr"] = subprocess.DEVNULL
+        return k
+
+    try:
+        # Ask gh to output only the PR URL to stdout
         out = subprocess.check_output(
-            ["gh", "pr", "create", "--title", title, "--body", body, "--fill"],
-            **kwargs,
-        )
-        return out.strip()
-    except Exception:
+            [
+                "gh",
+                "pr",
+                "create",
+                "--title",
+                title,
+                "--body",
+                body,
+                "--base",
+                base,
+                "--json",
+                "url",
+                "-q",
+                ".url",
+            ],
+            **_kwargs(),
+        ).strip()
+        if out:
+            return out
+    except Exception as e:
+        debug_log(f"gh pr create failed: {e}")
+
+    # Fallback: if PR already exists, return its URL
+    try:
+        out2 = subprocess.check_output(
+            ["gh", "pr", "view", "--json", "url", "-q", ".url"],
+            **_kwargs(),
+        ).strip()
+        return out2 or None
+    except Exception as e2:
+        debug_log(f"gh pr view failed: {e2}")
         return None
 
 
@@ -902,7 +943,7 @@ def process_one_todo(
     )
     pr_title = f"{cfg.github_pr_title_prefix}{item.title}"
     pr_body = cfg.github_pr_body_template.format(todo_item=item.title)
-    pr_url = create_pr(pr_title, pr_body, cwd=cwd)
+    pr_url = create_pr(pr_title, pr_body, cfg.git_base_branch, cwd=cwd)
     if pr_url:
         if cfg.pr_urls is not None:
             cfg.pr_urls.append(pr_url)
