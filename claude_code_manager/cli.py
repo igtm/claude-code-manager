@@ -9,6 +9,7 @@ import stat
 import string
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -415,15 +416,58 @@ def run_claude_code(
             except Exception:
                 pass
     else:
-        r_head = subprocess.run(
+        # Show a simple spinner and count response types by parsing JSONL
+        spinner_chars = "|/-\\"
+        idx = 0
+        counts: dict[str, int] = {}
+        for t in ("system", "assistant", "user", "event", "error"):
+            counts[t] = 0
+        p_head = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             env={**os.environ, **(env or {})},
             cwd=str(cwd) if cwd else None,
+            bufsize=1,
         )
-        return r_head.returncode
+        assert p_head.stdout is not None
+        try:
+            while True:
+                line = p_head.stdout.readline()
+                if not line:
+                    if p_head.poll() is not None:
+                        break
+                    # still running; tick spinner
+                    idx = (idx + 1) % len(spinner_chars)
+                    if sys.stdout.isatty() and COLOR_ENABLED:
+                        sys.stdout.write(f"\r{_ansi('36', 'loading')} {spinner_chars[idx]}")
+                        sys.stdout.flush()
+                    time.sleep(0.1)
+                    continue
+                # Got a line: try to parse JSON
+                try:
+                    obj = json.loads(line)
+                    typ = str(obj.get("type", "")).strip() or "(unknown)"
+                    counts[typ] = counts.get(typ, 0) + 1
+                except Exception:
+                    # ignore non-JSON lines
+                    pass
+            rc = int(p_head.returncode or 0)
+        finally:
+            try:
+                p_head.stdout.close()
+            except Exception:
+                pass
+            # clear spinner line
+            if sys.stdout.isatty():
+                sys.stdout.write("\r\x1b[2K")
+                sys.stdout.flush()
+        # Print summary of response types
+        echo(color_info("Claude response summary:"))
+        for k in sorted(counts.keys()):
+            echo(f"  - {k}: {counts[k]}")
+        return rc
 
 
 def git(*args: str, cwd: Path | None = None) -> str:
