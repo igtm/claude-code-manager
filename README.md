@@ -21,16 +21,24 @@ A powerful CLI tool to orchestrate Claude Code runs from a Markdown TODO list, e
 ## 📋 Installation
 
 ```bash
-# Install with uv
-uv pip install -e .
+# Install from PyPI (recommended)
+uv tool install claude-code-manager
 
-# Or with regular pip
-pip install -e .
+# Or with pip (inside your environment)
+pip install -U claude-code-manager
+
+# Run via uvx (no global install required)
+uvx --from claude-code-manager claude-manager --version
+# or simply (uvx will resolve the providing package)
+uvx claude-manager run --input TODO.md
+
+# Upgrade later
+uv tool upgrade claude-code-manager
 ```
 
 ## 🚀 Quick Start
 
-1. Create a markdown TODO list file:
+1. Create a markdown TODO.md list file:
 
 ```markdown
 - [x] Completed item [#1](https://github.com/user/repo/pull/1)
@@ -40,10 +48,17 @@ pip install -e .
 - [ ] Fix pagination in user list
 ```
 
+Note: Add TODO.md to your .gitignore so it isn't committed:
+
+```gitignore
+# Local planning checklist for claude-manager
+TODO.md
+```
+
 2. Run Claude Code Manager:
 
 ```bash
-claude-manager run --input TODO.md
+claude-manager run
 ```
 
 3. Each unchecked top-level item will be processed sequentially (or in parallel with `--worktree-parallel`):
@@ -65,7 +80,7 @@ claude-manager run --help
 claude-manager run --config my-config.toml
 
 # Enable parallel execution using Git worktrees
-claude-manager run --worktree-parallel --worktree-parallel-max-semaphore 3
+claude-manager run -w -s 3
 ```
 
 ### Configuration File
@@ -118,12 +133,12 @@ claude-manager run --headless-prompt-template "Implement this feature: {title}\n
 Process multiple todo items simultaneously:
 
 ```bash
-claude-manager run --worktree-parallel --worktree-parallel-max-semaphore 3
+claude-manager run -w -s 3
 ```
 
 ## 🤝 Contributing
 
-Contributions are welcome! See [IMPLEMENT_PROMPT.md](IMPLEMENT_PROMPT.md) for the design plan and implementation details.
+Contributions are welcome!
 
 ## 📄 License
 

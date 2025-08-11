@@ -1173,7 +1173,9 @@ def run(
     show_claude_output: bool = typer.Option(False, "--show-claude-output"),
     doctor: bool = typer.Option(False, "--doctor", "-D"),
     worktree_parallel: bool = typer.Option(False, "--worktree-parallel", "-w"),
-    worktree_parallel_max_semaphore: int = typer.Option(1, "--worktree-parallel-max-semaphore"),
+    worktree_parallel_max_semaphore: int = typer.Option(
+        1, "--worktree-parallel-max-semaphore", "-s"
+    ),
     lang: str = typer.Option("en", "--lang", "-L"),
     i18n_path: str = typer.Option(
         ".claude-manager.i18n.toml", "--i18n-path", help="Path to i18n TOML file"
