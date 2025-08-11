@@ -418,9 +418,8 @@ def run_claude_code(
         # Show a simple spinner and count response types by parsing JSONL
         spinner_chars = "|/-\\"
         idx = 0
-        counts: dict[str, int] = {}
-        for t in ("system", "assistant", "user", "event", "error"):
-            counts[t] = 0
+        counts: dict[str, int] = {"system": 0, "assistant": 0, "user": 0}
+        allowed = set(counts.keys())
         p_head = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -437,18 +436,18 @@ def run_claude_code(
                 if not line:
                     if p_head.poll() is not None:
                         break
-                    # still running; tick spinner
+                    # still running; tick spinner (write to stderr so it always shows)
                     idx = (idx + 1) % len(spinner_chars)
-                    if sys.stdout.isatty() and COLOR_ENABLED:
-                        sys.stdout.write(f"\r{_ansi('36', 'loading')} {spinner_chars[idx]}")
-                        sys.stdout.flush()
+                    sys.stderr.write(f"\r{_ansi('36', 'loading')} {spinner_chars[idx]}")
+                    sys.stderr.flush()
                     time.sleep(0.1)
                     continue
                 # Got a line: try to parse JSON
                 try:
                     obj = json.loads(line)
                     typ = str(obj.get("type", "")).strip() or "(unknown)"
-                    counts[typ] = counts.get(typ, 0) + 1
+                    if typ in allowed:
+                        counts[typ] = counts.get(typ, 0) + 1
                 except Exception:
                     # ignore non-JSON lines
                     pass
@@ -458,14 +457,16 @@ def run_claude_code(
                 p_head.stdout.close()
             except Exception:
                 pass
-            # clear spinner line
-            if sys.stdout.isatty():
-                sys.stdout.write("\r\x1b[2K")
-                sys.stdout.flush()
-        # Print summary of response types
+            # clear spinner line if possible, otherwise just break line
+            try:
+                sys.stderr.write("\r\x1b[2K\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+        # Print summary of response types (only system/assistant/user)
         echo(color_info("Claude response summary:"))
-        for k in sorted(counts.keys()):
-            echo(f"  - {k}: {counts[k]}")
+        for k in ("system", "assistant", "user"):
+            echo(f"  - {k}: {counts.get(k, 0)}")
         return rc
 
 
