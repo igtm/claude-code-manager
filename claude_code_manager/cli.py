@@ -441,44 +441,56 @@ def run_claude_code(
         spin_idx = 0
         last_len = 0
 
-        def _print_status(prefix_char: str | None = None):
+        def _print_status(prefix_char: str | None = None, *, final: bool = False):
             nonlocal last_len
             ch = prefix_char if prefix_char is not None else spinner[spin_idx % len(spinner)]
-            parts: list[str] = []
-            parts.append(
-                ", ".join(
-                    [
-                        f"assistant: {counts['assistant']}",
-                        f"user: {counts['user']}",
-                        f"system: {counts['system']}",
-                    ]
-                )
+            counts_part = ", ".join(
+                [
+                    f"assistant: {counts['assistant']}",
+                    f"user: {counts['user']}",
+                    f"system: {counts['system']}",
+                ]
             )
+            usage_part = ""
             if usage_totals:
                 usage_part = ", ".join(
                     f"{k}: {usage_totals[k]}" for k in sorted(usage_totals.keys())
                 )
-                parts.append(f"usage: {usage_part}")
-            msg = f"{ch} running claude...: " + " | ".join(parts)
-            try:
-                if sys.stderr.isatty():
-                    # On a TTY: clear the entire line
-                    # Truncate to terminal width to avoid wrapping
-                    try:
-                        width = shutil.get_terminal_size(fallback=(120, 20)).columns
-                    except Exception:
-                        width = 0
-                    if width and len(msg) >= width:
-                        msg = msg[: max(1, width - 1)]
-                    sys.stderr.write("\r\x1b[2K" + msg)
-                else:
-                    # Non-TTY: best-effort overwrite using CR and padding
-                    pad = max(0, last_len - len(msg))
-                    sys.stderr.write("\r" + msg + (" " * pad))
-                sys.stderr.flush()
-            except Exception:
-                pass
-            last_len = len(msg)
+                usage_part = f"usage: {usage_part}"
+
+            if sys.stderr.isatty():
+                # Two-line TTY status: line1 counts, line2 usage
+                line1 = f"{ch} running claude...: {counts_part}"
+                line2 = usage_part
+                try:
+                    width = shutil.get_terminal_size(fallback=(120, 20)).columns
+                except Exception:
+                    width = 0
+                if width and len(line1) >= width:
+                    line1 = line1[: max(1, width - 1)]
+                if width and len(line2) >= width:
+                    line2 = line2[: max(1, width - 1)]
+                try:
+                    sys.stderr.write("\r\x1b[2K" + line1)
+                    sys.stderr.write("\n\x1b[2K" + line2)
+                    if not final:
+                        # Move cursor up to be ready to overwrite both lines on next update
+                        sys.stderr.write("\x1b[1A")
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+            else:
+                # Non-TTY: fall back to single-line overwrite with counts + usage
+                combined = f"{ch} running claude...: {counts_part}"
+                if usage_part:
+                    combined = combined + " | " + usage_part
+                pad = max(0, last_len - len(combined))
+                try:
+                    sys.stderr.write("\r" + combined + (" " * pad))
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+                last_len = len(combined)
 
         # initial status
         _print_status()
