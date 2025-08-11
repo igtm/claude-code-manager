@@ -536,6 +536,18 @@ def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: str | None) -> 
     return False
 
 
+def _cleanup_failed_branch(base_branch: str, branch: str, cwd: Path | None = None) -> None:
+    """Cleanup logic when a branch processing fails: switch back to base and delete the branch."""
+    try:
+        git("checkout", base_branch, cwd=cwd)
+    except Exception:
+        pass
+    try:
+        git("branch", "-D", branch, cwd=cwd)
+    except Exception:
+        pass
+
+
 def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> None:
     branch = f"{cfg.git_branch_prefix}{slugify(item.title)}"
     ensure_branch(
@@ -569,9 +581,13 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> No
             )
         except FileNotFoundError:
             echo(tr("claude_not_found", cfg.lang), err=True)
+            # cleanup branch and return to base
+            _cleanup_failed_branch(cfg.git_base_branch, branch, cwd=cwd or Path.cwd())
             raise typer.Exit(code=1) from None
         if rc != 0:
             echo(tr("claude_failed", cfg.lang, code=rc), err=True)
+            # cleanup branch and return to base
+            _cleanup_failed_branch(cfg.git_base_branch, branch, cwd=cwd or Path.cwd())
             raise typer.Exit(code=1)
 
     commit_msg = f"{cfg.git_commit_message_prefix}{item.title}"
