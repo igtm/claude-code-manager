@@ -65,7 +65,39 @@ APP = typer.Typer(
 
 def echo(msg: str, err: bool = False):
     stream = sys.stderr if err else sys.stdout
+    # Colorize errors in red when enabled
+    if err:
+        try:
+            if COLOR_ENABLED:
+                msg = f"\x1b[31m{msg}\x1b[0m"
+        except NameError:
+            # COLOR_ENABLED not initialized yet
+            pass
     print(msg, file=stream)
+
+
+# --- simple color helpers ---
+COLOR_ENABLED = True  # will be set based on CLI option and TTY
+
+
+def _ansi(code: str, s: str) -> str:
+    return f"\x1b[{code}m{s}\x1b[0m" if COLOR_ENABLED else s
+
+
+def color_info(s: str) -> str:
+    return _ansi("36", s)  # cyan
+
+
+def color_success(s: str) -> str:
+    return _ansi("32", s)  # green
+
+
+def color_warn(s: str) -> str:
+    return _ansi("33", s)  # yellow
+
+
+def color_header(s: str) -> str:
+    return _ansi("1;36", s)  # bold cyan
 
 
 @APP.callback()
@@ -106,6 +138,9 @@ class Config:
         "Please apply necessary changes. When finished, output the token: {done_token}\n"
     )
     headless_output_format: str = "stream-json"
+    # Reporting
+    pr_urls: list[str] | None = None  # filled during run
+    color: bool = True
 
 
 TODO_TOP_PATTERN = re.compile(r"^- \[ \] (?P<title>.+)$")
@@ -586,7 +621,13 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> No
     pr_body = cfg.github_pr_body_template.format(todo_item=item.title)
     pr_url = create_pr(pr_title, pr_body, cwd=cwd)
     if pr_url:
-        echo(tr("pr_created", cfg.lang, url=pr_url))
+        echo(color_success(tr("pr_created", cfg.lang, url=pr_url)))
+        if cfg.pr_urls is not None:
+            cfg.pr_urls.append(pr_url)
+    else:
+        # still collect placeholder for reporting
+        if cfg.pr_urls is not None:
+            cfg.pr_urls.append("")
 
     # Update TODO.md with PR link; do not commit it (it's git-ignored)
     todo_path = (cwd or Path.cwd()) / cfg.input_path
@@ -643,6 +684,24 @@ def process_in_worktree(root: Path, item: TodoItem, cfg: Config) -> None:
     process_one_todo(item, cfg, cwd=wt_path)
 
 
+def _print_final_report(cfg: Config) -> None:
+    # Summary header
+    echo("")
+    echo(color_header("=== Summary Report ==="))
+
+    if not cfg.pr_urls:
+        echo(color_warn("No pull requests were created."))
+        return
+
+    # Print list of PR URLs
+    echo(color_info("Pull Requests:"))
+    for i, url in enumerate(cfg.pr_urls, start=1):
+        label = url if url else "(no PR created)"
+        echo(f"  {i}. {label}")
+
+    echo(color_success("Done."))
+
+
 @APP.command("run")
 def run(
     cooldown: int = typer.Option(0, "--cooldown", "-c"),
@@ -677,6 +736,8 @@ def run(
     headless_output_format: str = typer.Option(
         "stream-json", "--headless-output-format", help="Claude output format"
     ),
+    # Color option
+    no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
 ):
     cfg = Config(
         cooldown=cooldown,
@@ -699,6 +760,8 @@ def run(
         lang=lang,
         i18n_path=i18n_path,
         headless_output_format=headless_output_format,
+        pr_urls=[],
+        color=not no_color,
     )
     if headless_prompt_template:
         cfg.headless_prompt_template = headless_prompt_template
@@ -716,6 +779,10 @@ def run(
 
     # Load i18n from TOML
     set_i18n(root / cfg.i18n_path)
+
+    # set global color flag considering TTY as well
+    global COLOR_ENABLED
+    COLOR_ENABLED = bool(cfg.color) and sys.stdout.isatty()
 
     if doctor:
         echo(tr("doctor_validating", cfg.lang))
@@ -796,13 +863,18 @@ def run(
                 exc = fut.exception()
                 if exc:
                     raise exc
+        # After parallel run, print final report
+        _print_final_report(cfg)
         return
 
     for idx, item in enumerate(items):
-        echo(tr("processing", cfg.lang, title=item.title))
+        echo(color_info(tr("processing", cfg.lang, title=item.title)))
         process_one_todo(item, cfg, cwd=root)
         if idx < len(items) - 1 and cfg.cooldown > 0:
             time.sleep(cfg.cooldown)
+
+    # After sequential run, print final report
+    _print_final_report(cfg)
 
 
 def main():  # entry point
