@@ -272,202 +272,6 @@ def _get_flag_value(args_list: list[str], flag: str) -> str | None:
     return None
 
 
-def run_claude_code(
-    args: str,
-    show_output: bool,
-    env: dict | None = None,
-    cwd: Path | None = None,
-    *,
-    prompt: str,
-    output_format: str = "stream-json",
-    row_updater: Callable[[int, str, str, bool], None] | None = None,
-    row_index: int | None = None,
-) -> int:
-    # Always run in headless mode using -p
-    extra = _args_list(args)
-    cmd: list[str] = ["claude", "-p", prompt]
-
-    provided_fmt = _get_flag_value(extra, "--output-format")
-    effective_fmt = provided_fmt or output_format
-
-    if not provided_fmt:
-        cmd += ["--output-format", output_format]
-
-    # Ensure Claude emits structured info for stream-json
-    if effective_fmt == "stream-json" and not _args_has_flag(extra, "--verbose"):
-        cmd += ["--verbose"]
-
-    cmd += extra
-
-    debug_log(f"running: {' '.join(cmd)}")
-    debug_log(f"cwd={cwd or Path.cwd()}")
-    debug_log(f"show_output={show_output}, output_format={effective_fmt}")
-
-    if show_output:
-        p_head = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env={**os.environ, **(env or {})},
-            cwd=str(cwd) if cwd else None,
-        )
-        assert p_head.stdout is not None
-        try:
-            for line in p_head.stdout:
-                try:
-                    sys.stdout.write(line)
-                except Exception:
-                    pass
-            p_head.wait()
-            return int(p_head.returncode or 0)
-        finally:
-            try:
-                p_head.stdout.close()
-            except Exception:
-                pass
-    else:
-        counts: dict[str, int] = {"system": 0, "assistant": 0, "user": 0}
-        allowed = set(counts.keys())
-
-        spinner = "|/-\\"
-        spin_idx = 0
-        last_len = 0
-        aborted = False
-        errored = False
-
-        def _counts_text() -> str:
-            return ", ".join(
-                [
-                    f"assistant: {counts['assistant']}",
-                    f"user: {counts['user']}",
-                    f"system: {counts['system']}",
-                ]
-            )
-
-        def _print_status(prefix_char: str | None = None, *, final: bool = False):
-            nonlocal last_len
-            ch = prefix_char if prefix_char is not None else spinner[spin_idx % len(spinner)]
-
-            def _colorize_line_from_plain(line_plain: str) -> str:
-                line_colored = line_plain
-                try:
-                    if line_colored.startswith(ch):
-                        if ch == "✓":
-                            spin_col = color_success(ch)
-                        elif ch == "❌":
-                            spin_col = color_warn(ch)
-                        else:
-                            spin_col = color_info(ch)
-                        line_colored = spin_col + line_colored[len(ch) :]
-
-                    a_tok = f"assistant: {counts['assistant']}"
-                    u_tok = f"user: {counts['user']}"
-                    s_tok = f"system: {counts['system']}"
-                    if a_tok in line_colored:
-                        line_colored = line_colored.replace(a_tok, color_success(a_tok))
-                    if u_tok in line_colored:
-                        line_colored = line_colored.replace(u_tok, color_info(u_tok))
-                    if s_tok in line_colored:
-                        line_colored = line_colored.replace(s_tok, color_warn(s_tok))
-                except Exception:
-                    pass
-                return line_colored
-
-            if row_updater is not None and row_index is not None and sys.stderr.isatty():
-                line_plain = f"{ch} worktree {row_index + 1} | {_counts_text()}"
-                line_out = _colorize_line_from_plain(line_plain) if COLOR_ENABLED else line_plain
-                row_updater(row_index, line_out, "", final)
-                return
-
-            counts_part_plain = _counts_text()
-            line1_plain = f"{ch} running claude...: {counts_part_plain}"
-            try:
-                import shutil as _shutil
-
-                width = max(20, int(_shutil.get_terminal_size((80, 24)).columns))
-            except Exception:
-                width = 80
-            if len(line1_plain) > width:
-                line1_plain = line1_plain[: width - 1]
-
-            if sys.stderr.isatty():
-                try:
-                    line1_out = (
-                        _colorize_line_from_plain(line1_plain) if COLOR_ENABLED else line1_plain
-                    )
-                except Exception:
-                    line1_out = line1_plain
-                try:
-                    sys.stderr.write("\r\x1b[2K" + line1_out)
-                    sys.stderr.flush()
-                except Exception:
-                    pass
-            else:
-                pad = max(0, last_len - len(line1_plain))
-                try:
-                    sys.stderr.write("\r" + line1_plain + (" " * pad))
-                    sys.stderr.flush()
-                except Exception:
-                    pass
-                last_len = len(line1_plain)
-
-        _print_status()
-
-        p_head = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env={**os.environ, **(env or {})},
-            cwd=str(cwd) if cwd else None,
-        )
-        assert p_head.stdout is not None
-        rc = 1
-        try:
-            for line in p_head.stdout:
-                debug_log(f"line: {line.rstrip()}")
-                dirty = False
-                try:
-                    obj = json.loads(line)
-                    typ = str(obj.get("type", "")).strip()
-                    debug_log(f"parsed type={typ}")
-                    if typ in allowed:
-                        counts[typ] = counts.get(typ, 0) + 1
-                        dirty = True
-                    if dirty:
-                        spin_idx = (spin_idx + 1) % len(spinner)
-                        _print_status()
-                except Exception as e:
-                    debug_log(f"non-json or parse error: {e}")
-                    pass
-            p_head.wait()
-            rc = int(p_head.returncode or 0)
-        except KeyboardInterrupt:
-            aborted = True
-            try:
-                p_head.terminate()
-            except Exception:
-                pass
-            try:
-                p_head.wait(timeout=2)
-            except Exception:
-                pass
-        except Exception:
-            errored = True
-        finally:
-            try:
-                p_head.stdout.close()
-            except Exception:
-                pass
-        try:
-            marker = "✓" if (not aborted and not errored and rc == 0) else "❌"
-            _print_status(prefix_char=marker, final=True)
-        except Exception:
-            pass
-        return rc
-
-
 def run_claude_and_detect(
     args: str,
     show_output: bool,
@@ -475,10 +279,10 @@ def run_claude_and_detect(
     cwd: Path | None = None,
     *,
     prompt: str,
+    done_token: str,
+    row_index: int,
     output_format: str = "stream-json",
     row_updater: Callable[[int, str, str, bool], None] | None = None,
-    row_index: int | None = None,
-    done_token: str,
 ) -> tuple[int, bool]:
     """Run Claude once and detect if done_token appears in the streamed output.
     Returns (return_code, done_seen).
@@ -576,14 +380,14 @@ def run_claude_and_detect(
                     pass
                 return line_colored
 
-            if row_updater is not None and row_index is not None and sys.stderr.isatty():
+            if row_updater is not None and sys.stderr.isatty():
                 line_plain = f"{ch} worktree {row_index + 1} | {_counts_text()}"
                 line_out = _colorize_line_from_plain(line_plain) if COLOR_ENABLED else line_plain
                 row_updater(row_index, line_out, "", final)
                 return
 
             counts_part_plain = _counts_text()
-            line1_plain = f"{ch} running claude...: {counts_part_plain}"
+            line1_plain = f"{ch} todo {row_index + 1}: {counts_part_plain}"
             try:
                 import shutil as _shutil
 
@@ -976,8 +780,8 @@ def process_one_todo(
     *,
     skip_branch_ensure: bool = False,
     branch_name: str | None = None,
+    row_index: int,
     row_updater: Callable[[int, str, str, bool], None] | None = None,
-    row_index: int | None = None,
 ) -> str | None:
     branch = branch_name or f"{cfg.git_branch_prefix}{slugify(item.title)}"
     if not skip_branch_ensure:
@@ -1008,10 +812,10 @@ def process_one_todo(
                 cfg.show_claude_output,
                 cwd=cwd or Path.cwd(),
                 prompt=prompt_current,
+                done_token=cfg.task_done_message,
+                row_index=row_index,
                 output_format=cfg.headless_output_format,
                 row_updater=row_updater,
-                row_index=row_index,
-                done_token=cfg.task_done_message,
             )
         except FileNotFoundError:
             echo(tr("claude_not_found", cfg.lang), err=True)
@@ -1093,7 +897,7 @@ def process_in_worktree(
     cfg: Config,
     *,
     row_updater: Callable[[int, str, str, bool], None] | None = None,
-    row_index: int | None = None,
+    row_index: int,
 ) -> None:
     worktrees_dir = root / ".worktrees"
     worktrees_dir.mkdir(exist_ok=True)
@@ -1381,7 +1185,7 @@ def run(
 
     for idx, item in enumerate(items):
         echo(color_info(tr("processing", cfg.lang, title=item.title)))
-        _ = process_one_todo(item, cfg, cwd=root)
+        _ = process_one_todo(item, cfg, cwd=root, row_index=idx)
         if idx < len(items) - 1 and cfg.cooldown > 0:
             time.sleep(cfg.cooldown)
 

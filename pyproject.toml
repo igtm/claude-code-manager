@@ -1,6 +1,6 @@
 [project]
 name            = "claude-code-manager"
-version         = "0.0.1"
+version = "0.0.2"
 description     = "CLI to orchestrate claude-code runs from a Markdown TODO list"
 readme          = "README.md"
 requires-python = ">=3.11"
