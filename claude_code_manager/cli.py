@@ -920,6 +920,41 @@ def process_one_todo(
     return pr_url
 
 
+# Registry to track worktrees created during this run
+CREATED_WORKTREES: list[Path] = []
+CREATED_WORKTREES_LOCK = threading.Lock()
+
+
+def _cleanup_created_worktrees(root: Path) -> None:
+    """Best-effort removal of worktrees created during this run."""
+    try:
+        with CREATED_WORKTREES_LOCK:
+            paths = list(CREATED_WORKTREES)
+        for wt_path in paths:
+            try:
+                subprocess.run(
+                    ["git", "worktree", "remove", "-f", str(wt_path)],
+                    cwd=root,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except Exception:
+                pass
+        # prune registry of paths that no longer exist
+        with CREATED_WORKTREES_LOCK:
+            remaining: list[Path] = []
+            for p in CREATED_WORKTREES:
+                try:
+                    if p.exists():
+                        remaining.append(p)
+                except Exception:
+                    pass
+            CREATED_WORKTREES[:] = remaining
+    except Exception:
+        pass
+
+
 def process_in_worktree(
     root: Path,
     item: TodoItem,
@@ -952,24 +987,51 @@ def process_in_worktree(
     # Create the worktree bound to branch based on base branch tip
     git("worktree", "add", "-B", branch, str(wt_path), cfg.git_base_branch, cwd=root)
 
-    # Do NOT switch to base/main inside the worktree; it's already on the new branch
-    pr_url = process_one_todo(
-        item,
-        cfg,
-        cwd=wt_path,
-        skip_branch_ensure=True,
-        branch_name=branch,
-        row_updater=row_updater,
-        row_index=row_index,
-    )
-
-    # After worktree completes, update the ROOT TODO.md with a check and PR URL
+    # Register created worktree for cleanup
     try:
-        with TODO_UPDATE_LOCK:
-            update_todo_with_pr(root / cfg.input_path, item, pr_url)
+        with CREATED_WORKTREES_LOCK:
+            CREATED_WORKTREES.append(wt_path)
     except Exception:
-        # Best-effort; ignore errors updating the shared TODO
         pass
+
+    try:
+        # Do NOT switch to base/main inside the worktree; it's already on the new branch
+        pr_url = process_one_todo(
+            item,
+            cfg,
+            cwd=wt_path,
+            skip_branch_ensure=True,
+            branch_name=branch,
+            row_updater=row_updater,
+            row_index=row_index,
+        )
+
+        # After worktree completes, update the ROOT TODO.md with a check and PR URL
+        try:
+            with TODO_UPDATE_LOCK:
+                update_todo_with_pr(root / cfg.input_path, item, pr_url)
+        except Exception:
+            # Best-effort; ignore errors updating the shared TODO
+            pass
+    finally:
+        # Always attempt to remove the worktree
+        try:
+            subprocess.run(
+                ["git", "worktree", "remove", "-f", str(wt_path)],
+                cwd=root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except Exception:
+            pass
+        # Unregister
+        try:
+            with CREATED_WORKTREES_LOCK:
+                if wt_path in CREATED_WORKTREES:
+                    CREATED_WORKTREES.remove(wt_path)
+        except Exception:
+            pass
 
 
 def _print_final_report(cfg: Config) -> None:
@@ -1151,7 +1213,8 @@ def run(
         echo(tr("running_parallel", cfg.lang, workers=max_workers))
         _warn_if_worktrees_not_ignored(root, lang=cfg.lang)
         live = LiveRows(len(items), lines_per_row=1) if sys.stderr.isatty() else None
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        ex = ThreadPoolExecutor(max_workers=max_workers)
+        try:
             futures = [
                 ex.submit(
                     process_in_worktree,
@@ -1167,12 +1230,26 @@ def run(
                 exc = fut.exception()
                 if exc:
                     raise exc
-        if live:
-            live.finish()
-        try:
-            git("checkout", cfg.git_base_branch, cwd=root)
-        except Exception:
-            pass
+        except KeyboardInterrupt:
+            # Cancel remaining futures and cleanup worktrees
+            try:
+                for fut in futures:
+                    fut.cancel()
+            except Exception:
+                pass
+        finally:
+            try:
+                ex.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            if live:
+                live.finish()
+            # Best-effort cleanup of any remaining worktrees
+            _cleanup_created_worktrees(root)
+            try:
+                git("checkout", cfg.git_base_branch, cwd=root)
+            except Exception:
+                pass
         _print_final_report(cfg)
         return
 
