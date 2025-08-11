@@ -327,7 +327,7 @@ def run_claude_code(
             except Exception:
                 pass
     else:
-        counts: dict[str, int] = {"system": 0, "assistant": 0, "user": 0}
+        counts: dict[str, int] = {"system": 0, "assistant": 0, "user": 0, "keep_asking": 0}
         allowed = set(counts.keys())
 
         spinner = "|/-\\"
@@ -342,6 +342,7 @@ def run_claude_code(
                     f"assistant: {counts['assistant']}",
                     f"user: {counts['user']}",
                     f"system: {counts['system']}",
+                    f"keep_asking: {counts['keep_asking']}",
                 ]
             )
 
@@ -364,12 +365,15 @@ def run_claude_code(
                     a_tok = f"assistant: {counts['assistant']}"
                     u_tok = f"user: {counts['user']}"
                     s_tok = f"system: {counts['system']}"
+                    k_tok = f"keep_asking: {counts['keep_asking']}"
                     if a_tok in line_colored:
                         line_colored = line_colored.replace(a_tok, color_success(a_tok))
                     if u_tok in line_colored:
                         line_colored = line_colored.replace(u_tok, color_info(u_tok))
                     if s_tok in line_colored:
                         line_colored = line_colored.replace(s_tok, color_warn(s_tok))
+                    if k_tok in line_colored:
+                        line_colored = line_colored.replace(k_tok, color_debug(k_tok))
                 except Exception:
                     pass
                 return line_colored
@@ -529,7 +533,7 @@ def run_claude_and_detect(
             except Exception:
                 pass
     else:
-        counts: dict[str, int] = {"system": 0, "assistant": 0, "user": 0}
+        counts: dict[str, int] = {"system": 0, "assistant": 0, "user": 0, "keep_asking": 0}
         allowed = set(counts.keys())
 
         spinner = "|/-\\"
@@ -544,6 +548,7 @@ def run_claude_and_detect(
                     f"assistant: {counts['assistant']}",
                     f"user: {counts['user']}",
                     f"system: {counts['system']}",
+                    f"keep_asking: {counts['keep_asking']}",
                 ]
             )
 
@@ -566,12 +571,15 @@ def run_claude_and_detect(
                     a_tok = f"assistant: {counts['assistant']}"
                     u_tok = f"user: {counts['user']}"
                     s_tok = f"system: {counts['system']}"
+                    k_tok = f"keep_asking: {counts['keep_asking']}"
                     if a_tok in line_colored:
                         line_colored = line_colored.replace(a_tok, color_success(a_tok))
                     if u_tok in line_colored:
                         line_colored = line_colored.replace(u_tok, color_info(u_tok))
                     if s_tok in line_colored:
                         line_colored = line_colored.replace(s_tok, color_warn(s_tok))
+                    if k_tok in line_colored:
+                        line_colored = line_colored.replace(k_tok, color_debug(k_tok))
                 except Exception:
                     pass
                 return line_colored
