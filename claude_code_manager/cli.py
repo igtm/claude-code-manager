@@ -315,7 +315,18 @@ def _args_list(args: str) -> list[str]:
 
 
 def _args_has_flag(args_list: list[str], flag: str) -> bool:
-    return any(a == flag or a.startswith(flag + "=") for a in args_list)
+    return any(a == flag or a.startswith(flag + "=") for a in args_list) or any(
+        args_list[i] == flag and i + 1 < len(args_list) for i in range(len(args_list))
+    )
+
+
+def _get_flag_value(args_list: list[str], flag: str) -> str | None:
+    for i, a in enumerate(args_list):
+        if a == flag and i + 1 < len(args_list):
+            return args_list[i + 1]
+        if a.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return None
 
 
 def run_claude_code(
@@ -330,8 +341,18 @@ def run_claude_code(
     # Always run in headless mode using -p
     extra = _args_list(args)
     cmd: list[str] = ["claude", "-p", prompt]
-    if not _args_has_flag(extra, "--output-format"):
+
+    provided_fmt = _get_flag_value(extra, "--output-format")
+    effective_fmt = provided_fmt or output_format
+
+    if not provided_fmt:
         cmd += ["--output-format", output_format]
+
+    # Claude requires --verbose with stream-json when printing
+    if effective_fmt == "stream-json" and (show_output or _args_has_flag(extra, "--print")):
+        if not _args_has_flag(extra, "--verbose"):
+            cmd += ["--verbose"]
+
     cmd += extra
 
     if show_output:
