@@ -616,6 +616,27 @@ def is_git_ignored(path: Path, cwd: Path | None = None) -> bool:
     return res.returncode == 0
 
 
+def _warn_if_worktrees_not_ignored(root: Path, *, lang: str) -> None:
+    """Warn user to add .worktrees to .gitignore if it's not ignored."""
+    wt = root / ".worktrees"
+    try:
+        if not is_git_ignored(wt, cwd=root):
+            if (lang or "").lower().startswith("ja"):
+                msg = (
+                    "⚠️ .worktrees が .gitignore に含まれていません。"
+                    "git worktree 並列モードでは '.worktrees/' を .gitignore に追加してください。"
+                )
+            else:
+                msg = (
+                    "⚠️ .worktrees is not in .gitignore. "
+                    "For worktree parallel mode, add '.worktrees/' to .gitignore."
+                )
+            echo(color_warn(msg))
+    except Exception:
+        # best-effort warning only
+        pass
+
+
 def _list_tracked_changes(cwd: Path | None = None) -> set[str]:
     changed: set[str] = set()
     try:
@@ -737,16 +758,46 @@ def update_todo_with_pr(todo_path: Path, item: TodoItem, pr_url: str | None) -> 
     return False
 
 
-def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> None:
+# Insert helpers earlier for lint friendliness
+
+
+def slugify(text: str) -> str:
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9-_]+", "-", text)
+    slug = re.sub(r"-+", "-", text).strip("-")
+    # Add 6 random alphanumeric chars for uniqueness
+    rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"{slug}-{rand}"
+
+
+def load_config_toml(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        import tomllib  # Python 3.11+
+
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def process_one_todo(
+    item: TodoItem,
+    cfg: Config,
+    cwd: Path | None = None,
+    *,
+    skip_branch_ensure: bool = False,
+) -> None:
     branch = f"{cfg.git_branch_prefix}{slugify(item.title)}"
-    ensure_branch(
-        cfg.git_base_branch,
-        branch,
-        cwd=cwd,
-        prefer_local_todo=True,
-        todo_relpath=cfg.input_path,
-        lang=cfg.lang,
-    )
+    if not skip_branch_ensure:
+        ensure_branch(
+            cfg.git_base_branch,
+            branch,
+            cwd=cwd,
+            prefer_local_todo=True,
+            todo_relpath=cfg.input_path,
+            lang=cfg.lang,
+        )
 
     hooks_path = (cwd or Path.cwd()) / cfg.hooks_config
     ensure_hooks_config(hooks_path, cfg.max_keep_asking, cfg.task_done_message)
@@ -802,52 +853,33 @@ def process_one_todo(item: TodoItem, cfg: Config, cwd: Path | None = None) -> No
         pass
 
 
-def slugify(text: str) -> str:
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9-_]+", "-", text)
-    slug = re.sub(r"-+", "-", text).strip("-")
-    # Add 6 random alphanumeric chars for uniqueness
-    rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
-    return f"{slug}-{rand}"
-
-
-def load_config_toml(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        import tomllib  # Python 3.11+
-
-        return tomllib.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
 def process_in_worktree(root: Path, item: TodoItem, cfg: Config) -> None:
     worktrees_dir = root / ".worktrees"
     worktrees_dir.mkdir(exist_ok=True)
-    branch = f"{cfg.git_branch_prefix}{slugify(item.title)}"
-    wt_path = worktrees_dir / slugify(item.title)
 
-    # Create or reset worktree pointing to the branch
+    # Use a single slug for both branch and worktree path to avoid mismatch
+    slug = slugify(item.title)
+    branch = f"{cfg.git_branch_prefix}{slug}"
+    wt_path = worktrees_dir / slug
+
+    # Remove any existing directory silently if it is a registered worktree; suppress noisy errors
     try:
-        git("worktree", "remove", "-f", str(wt_path), cwd=root)
+        subprocess.run(
+            ["git", "worktree", "remove", "-f", str(wt_path)],
+            cwd=root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
     except Exception:
         pass
+
     git("fetch", cwd=root)
     # Create the worktree bound to branch based on base branch tip
     git("worktree", "add", "-B", branch, str(wt_path), cfg.git_base_branch, cwd=root)
-    # After creating worktree, ensure branch logic inside that tree respects local TODO
-    ensure_branch(
-        cfg.git_base_branch,
-        branch,
-        cwd=wt_path,
-        prefer_local_todo=True,
-        todo_relpath=cfg.input_path,
-        lang=cfg.lang,
-    )
 
-    # Now process inside the worktree path
-    process_one_todo(item, cfg, cwd=wt_path)
+    # Do NOT switch to base/main inside the worktree; it's already on the new branch
+    process_one_todo(item, cfg, cwd=wt_path, skip_branch_ensure=True)
 
 
 def _print_final_report(cfg: Config) -> None:
@@ -1024,6 +1056,8 @@ def run(
     if cfg.worktree_parallel:
         max_workers = max(1, int(cfg.worktree_parallel_max_semaphore))
         echo(tr("running_parallel", cfg.lang, workers=max_workers))
+        # Warn if .worktrees is not ignored, but do not block
+        _warn_if_worktrees_not_ignored(root, lang=cfg.lang)
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(process_in_worktree, root, item, cfg) for item in items]
             for fut in as_completed(futures):
