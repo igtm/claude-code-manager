@@ -512,11 +512,38 @@ def run_claude_code(
             nonlocal last_len
             ch = prefix_char if prefix_char is not None else spinner[spin_idx % len(spinner)]
 
+            def _colorize_line_from_plain(line_plain: str) -> str:
+                line_colored = line_plain
+                try:
+                    # Color spinner/check/cross at the start
+                    if line_colored.startswith(ch):
+                        if ch == "✓":
+                            spin_col = color_success(ch)
+                        elif ch == "❌":
+                            spin_col = color_warn(ch)
+                        else:
+                            spin_col = color_info(ch)
+                        line_colored = spin_col + line_colored[len(ch) :]
+
+                    # Color the role counts
+                    a_tok = f"assistant: {counts['assistant']}"
+                    u_tok = f"user: {counts['user']}"
+                    s_tok = f"system: {counts['system']}"
+                    if a_tok in line_colored:
+                        line_colored = line_colored.replace(a_tok, color_success(a_tok))
+                    if u_tok in line_colored:
+                        line_colored = line_colored.replace(u_tok, color_info(u_tok))
+                    if s_tok in line_colored:
+                        line_colored = line_colored.replace(s_tok, color_warn(s_tok))
+                except Exception:
+                    pass
+                return line_colored
+
             if row_updater is not None and row_index is not None and sys.stderr.isatty():
-                # Parallel worktree rendering: single line per worktree, no color, no usage
-                head = ch
-                line = f"{head} worktree {row_index + 1} | {_counts_text()}"
-                row_updater(row_index, line, "", final)
+                # Parallel worktree rendering: single line per worktree
+                line_plain = f"{ch} worktree {row_index + 1} | {_counts_text()}"
+                line_out = _colorize_line_from_plain(line_plain) if COLOR_ENABLED else line_plain
+                row_updater(row_index, line_out, "", final)
                 return
 
             # Fallback: single-line spinner + counts (no usage)
@@ -532,18 +559,10 @@ def run_claude_code(
                 line1_plain = line1_plain[: width - 1]
 
             if sys.stderr.isatty():
-                # Optional colorization for spinner only
                 try:
-                    if ch == "✓":
-                        spinner_col = color_success(ch)
-                    elif ch == "❌":
-                        spinner_col = color_warn(ch)
-                    else:
-                        spinner_col = color_info(ch)
-                    if line1_plain.startswith(ch):
-                        line1_out = spinner_col + line1_plain[len(ch) :]
-                    else:
-                        line1_out = line1_plain
+                    line1_out = (
+                        _colorize_line_from_plain(line1_plain) if COLOR_ENABLED else line1_plain
+                    )
                 except Exception:
                     line1_out = line1_plain
                 try:
@@ -652,7 +671,11 @@ def git(*args: str, cwd: Path | None = None) -> str:
 
 
 def git_call(args: list[str], cwd: Path | None = None) -> None:
-    subprocess.check_call(["git", *args], cwd=str(cwd) if cwd else None)
+    # Suppress stdout from git when not debugging; keep stderr visible for errors
+    kwargs: dict = {}
+    if not DEBUG_ENABLED:
+        kwargs["stdout"] = subprocess.DEVNULL
+    subprocess.check_call(["git", *args], cwd=str(cwd) if cwd else None, **kwargs)
 
 
 def is_git_ignored(path: Path, cwd: Path | None = None) -> bool:
