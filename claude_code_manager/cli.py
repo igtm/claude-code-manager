@@ -384,10 +384,9 @@ def run_claude_code(
     if not provided_fmt:
         cmd += ["--output-format", output_format]
 
-    # Claude requires --verbose with stream-json when printing
-    if effective_fmt == "stream-json" and (show_output or _args_has_flag(extra, "--print")):
-        if not _args_has_flag(extra, "--verbose"):
-            cmd += ["--verbose"]
+    # Always add --verbose for stream-json to ensure proper JSONL output
+    if effective_fmt == "stream-json" and not _args_has_flag(extra, "--verbose"):
+        cmd += ["--verbose"]
 
     cmd += extra
 
