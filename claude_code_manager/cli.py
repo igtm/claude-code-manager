@@ -814,48 +814,104 @@ def commit_and_push(message: str, branch: str, cwd: Path | None = None):
     _commit_and_push_filtered(message, branch, cwd=cwd)
 
 
-def create_pr(title: str, body: str, base: str, cwd: Path | None = None) -> str | None:
-    # Create a PR using GitHub CLI and return the URL. Keep output quiet in non-debug.
-    def _kwargs():
+def create_pr(title: str, body: str, base: str, head: str, cwd: Path | None = None) -> str | None:
+    """Create a PR using GitHub CLI and return the PR URL.
+    - Prefer JSON output if supported by the installed gh.
+    - Fall back to classic stdout parsing when --json is unavailable.
+    """
+
+    def _kwargs_capture():
         k: dict = {"text": True, "cwd": str(cwd) if cwd else None}
         if not DEBUG_ENABLED:
             k["stderr"] = subprocess.DEVNULL
         return k
 
+    # Detect feature support
+    supports_json = False
     try:
-        # Ask gh to output only the PR URL to stdout
-        out = subprocess.check_output(
-            [
-                "gh",
-                "pr",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--base",
-                base,
-                "--json",
-                "url",
-                "-q",
-                ".url",
-            ],
-            **_kwargs(),
-        ).strip()
-        if out:
-            return out
-    except Exception as e:
-        debug_log(f"gh pr create failed: {e}")
+        help_txt = subprocess.check_output(
+            ["gh", "pr", "create", "--help"], text=True, stderr=subprocess.DEVNULL
+        )
+        if "--json" in help_txt and "-q" in help_txt:
+            supports_json = True
+    except Exception:
+        pass
 
-    # Fallback: if PR already exists, return its URL
+    if supports_json:
+        try:
+            out = subprocess.check_output(
+                [
+                    "gh",
+                    "pr",
+                    "create",
+                    "--title",
+                    title,
+                    "--body",
+                    body,
+                    "--base",
+                    base,
+                    "--head",
+                    head,
+                    "--json",
+                    "url",
+                    "-q",
+                    ".url",
+                ],
+                **_kwargs_capture(),
+            ).strip()
+            if out:
+                return out
+        except Exception as e:
+            debug_log(f"gh pr create (json) failed: {e}")
+    else:
+        try:
+            # Classic mode: capture stdout and parse PR URL
+            out2 = subprocess.check_output(
+                [
+                    "gh",
+                    "pr",
+                    "create",
+                    "--title",
+                    title,
+                    "--body",
+                    body,
+                    "--base",
+                    base,
+                    "--head",
+                    head,
+                ],
+                **_kwargs_capture(),
+            )
+            # Try to find URL like https://github.com/.../pull/123
+            m = re.search(r"https?://[^\s]+/pull/\d+", out2)
+            if m:
+                return m.group(0)
+        except Exception as e2:
+            debug_log(f"gh pr create (classic) failed: {e2}")
+
+    # Fallback: try to get existing PR for this branch
     try:
-        out2 = subprocess.check_output(
-            ["gh", "pr", "view", "--json", "url", "-q", ".url"],
-            **_kwargs(),
-        ).strip()
-        return out2 or None
-    except Exception as e2:
-        debug_log(f"gh pr view failed: {e2}")
+        # Detect json support for `pr view`
+        supports_json_view = False
+        help_view = subprocess.check_output(
+            ["gh", "pr", "view", "--help"], text=True, stderr=subprocess.DEVNULL
+        )
+        if "--json" in help_view and "-q" in help_view:
+            supports_json_view = True
+        if supports_json_view:
+            outv = subprocess.check_output(
+                ["gh", "pr", "view", head, "--json", "url", "-q", ".url"],
+                **_kwargs_capture(),
+            ).strip()
+            if outv:
+                return outv
+        else:
+            outv2 = subprocess.check_output(["gh", "pr", "view", head], **_kwargs_capture())
+            m2 = re.search(r"https?://[^\s]+/pull/\d+", outv2)
+            if m2:
+                return m2.group(0)
+    except Exception as e3:
+        debug_log(f"gh pr view fallback failed: {e3}")
         return None
 
 
@@ -943,7 +999,7 @@ def process_one_todo(
     )
     pr_title = f"{cfg.github_pr_title_prefix}{item.title}"
     pr_body = cfg.github_pr_body_template.format(todo_item=item.title)
-    pr_url = create_pr(pr_title, pr_body, cfg.git_base_branch, cwd=cwd)
+    pr_url = create_pr(pr_title, pr_body, cfg.git_base_branch, branch, cwd=cwd)
     if pr_url:
         if cfg.pr_urls is not None:
             cfg.pr_urls.append(pr_url)
