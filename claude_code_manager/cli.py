@@ -904,7 +904,6 @@ def process_one_todo(
     pr_body = cfg.github_pr_body_template.format(todo_item=item.title)
     pr_url = create_pr(pr_title, pr_body, cwd=cwd)
     if pr_url:
-        echo(color_success(tr("pr_created", cfg.lang, url=pr_url)))
         if cfg.pr_urls is not None:
             cfg.pr_urls.append(pr_url)
     else:
